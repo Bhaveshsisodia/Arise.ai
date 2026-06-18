@@ -17,7 +17,7 @@ reranker:
   model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 llm:
-  model: "openai/gpt-oss-120b"
+  model:  "llama-3.3-70b-versatile"
   temperature: 0
 
 retrieval:
@@ -30,7 +30,7 @@ retrieval:
   rrf_k: 60           # RRF fusion constant
 
 query_rewriting:
-  default_strategy: "stepback"   # baseline | hyde | multi | stepback | combined
+  default_strategy: "multi"   # baseline | hyde | multi | stepback | combined
   multi_query_variants: 4        # number of query variants for multi-query
   hyde_max_tokens: 200           # max tokens for hypothetical answer generation
   baseline_weight: 1.5           # RRF weight for baseline in combined mode
