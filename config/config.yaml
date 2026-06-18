@@ -1,0 +1,37 @@
+# ============================================================
+# JUSNL RAG Pipeline — Central Configuration
+# All hardcoded values from the notebook live here.
+# Change one value here, it propagates everywhere.
+# ============================================================
+
+mongodb:
+  database: "RAG"
+  collection: "tariff_petition"
+  vector_index: "vector_index"
+
+embedding:
+  model: "BAAI/bge-large-en-v1.5"
+  dimensions: 1024
+
+reranker:
+  model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+llm:
+  model: "openai/gpt-oss-120b"
+  temperature: 0
+
+retrieval:
+  stage1_k: 50        # hybrid RRF candidates
+  stage2_k: 10        # cross-encoder top-k
+  stage3_k: 5         # LLM listwise final top-k
+  vec_candidates: 100 # numCandidates for $vectorSearch
+  text_limit: 50      # BM25 text search limit
+  mmr_lambda: 0.7     # MMR diversity weight (1.0 = pure relevance)
+  rrf_k: 60           # RRF fusion constant
+
+query_rewriting:
+  default_strategy: "stepback"   # baseline | hyde | multi | stepback | combined
+  multi_query_variants: 4        # number of query variants for multi-query
+  hyde_max_tokens: 200           # max tokens for hypothetical answer generation
+  baseline_weight: 1.5           # RRF weight for baseline in combined mode
+  rewriter_weight: 1.0           # RRF weight for hyde/multi/stepback in combined mode
