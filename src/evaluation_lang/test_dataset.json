@@ -1,0 +1,29 @@
+[
+        {
+            "inputs": {
+                "question": "What is JUSNL?"
+            },
+            "outputs": {
+                "answer": "Jharkhand Urja Sancharan Nigam Limited (JUSNL) is the State Transmission Utility responsible for power transmission in Jharkhand."
+            }
+        },
+        {
+            "inputs": {
+                "question": "What employee expenses has JUSNL projected?"
+            },
+            "outputs": {
+                "answer": "JUSNL projected total employee expenses of Rs. 107.54 Crore for FY 2025-26."
+            }
+        },
+
+        {
+            "inputs": {
+                "question": "What A&G expenses has JUSNL projected?"
+            },
+            "outputs": {
+                "answer": "JUSNL projected A&G expenses of Rs. 25.45 Crore."
+            }
+        }
+
+
+    ]

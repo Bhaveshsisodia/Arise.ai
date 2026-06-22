@@ -36,6 +36,7 @@ from src.vector_db import collection
 from src.retriever import MongoHybridRetriever
 from src.reranker import CrossEncoderReranker, LLMListwiseReranker
 from src.generator import get_llm, build_context, RAG_PROMPT, output_parser
+from src.utils.logger import pipeline_logger as logger
 
 load_dotenv()
 
@@ -131,15 +132,38 @@ def build_chain(use_llm_reranker: bool = True):
     print(f"✅ LLM loaded | model={CFG['llm']['model']}")
 
     # ── Instantiate components ────────────────────────────────
-    retriever    = MongoHybridRetriever(
-        embedder   = embedder,
-        llm        = llm,
-        collection = collection,
-        use_mmr    = True,
+    # read toggles from config
+    use_mmr_cfg = CFG["retrieval"].get("use_mmr", True)
+    use_ce_cfg = CFG.get("reranker", {}).get("use_ce", True)
+    use_llm_cfg = CFG.get("reranker", {}).get("use_llm", True)
 
+    logger.info(
+        "build_chain | embed_model=%s use_mmr=%s use_ce=%s use_llm=%s llm_model=%s",
+        CFG["embedding"]["model"],
+        use_mmr_cfg,
+        use_ce_cfg,
+        use_llm_cfg,
+        CFG["llm"]["model"],
     )
-    ce_reranker  = CrossEncoderReranker()
-    llm_reranker = LLMListwiseReranker(llm=llm)
+    from src.utils.logger import pipeline_event
+    pipeline_event(
+        "chain.build",
+        embed_model=CFG["embedding"]["model"],
+        use_mmr=use_mmr_cfg,
+        use_ce=use_ce_cfg,
+        use_llm=use_llm_cfg,
+        llm_model=CFG["llm"]["model"],
+    )
+
+    retriever = MongoHybridRetriever(
+        embedder=embedder,
+        llm=llm,
+        collection=collection,
+        use_mmr=use_mmr_cfg,
+    )
+
+    ce_reranker = CrossEncoderReranker() if use_ce_cfg else None
+    llm_reranker = LLMListwiseReranker(llm=llm) if use_llm_cfg else None
 
     # ── LCEL chain definition ─────────────────────────────────
     #
@@ -160,17 +184,21 @@ def build_chain(use_llm_reranker: bool = True):
         documents = RunnableLambda(lambda x: retriever.invoke(x["question"])).with_config({"run_name": "Stage1-Retrieval"})
     )
 
-    # Stage 2: cross-encoder rerank
-    stage2 = RunnablePassthrough.assign(
-        documents = RunnableLambda(
-            lambda x: _apply_ce_reranker(x, ce_reranker)
-        ).with_config({"run_name": "Stage2-CrossEncoder"})
-    )
+    # Stage 2: cross-encoder rerank (optional)
+    if ce_reranker is not None:
+        stage2 = RunnablePassthrough.assign(
+            documents=RunnableLambda(
+                lambda x: _apply_ce_reranker(x, ce_reranker)
+            ).with_config({"run_name": "Stage2-CrossEncoder"})
+        )
+    else:
+        stage2 = RunnablePassthrough()
 
-    # Stage 3: LLM listwise rerank (optional)
-    if use_llm_reranker:
+    # Stage 3: LLM listwise rerank (optional via config)
+    final_use_llm = use_llm_reranker and (llm_reranker is not None)
+    if final_use_llm:
         stage3 = RunnablePassthrough.assign(
-            documents = RunnableLambda(
+            documents=RunnableLambda(
                 lambda x: _apply_llm_reranker(x, llm_reranker)
             ).with_config({"run_name": "Stage3-LLMReranker"})
         )

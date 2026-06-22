@@ -26,6 +26,7 @@ from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from sentence_transformers import util
 
 from src.config import CFG
+from src.utils.logger import pipeline_logger as logger, pipeline_event
 from src.metadata_filter import get_query_filters
 from src.query_optimizer import hyde_rewrite, multi_query_rewrite, stepback_rewrite
 
@@ -182,29 +183,64 @@ def hybrid_retrieve(
     vec_candidates = vec_candidates or cfg["vec_candidates"]
     text_limit     = text_limit     or cfg["text_limit"]
 
-    mongo_filter    = get_query_filters(query, llm, collection)
-    query_embedding = _get_embedding(query, embedder)
+    use_vector = cfg.get("use_vector", True)
+    use_text = cfg.get("use_text", True)
 
-    # Vector search
-    vector_results = _vector_search(
-        query_embedding, collection, mongo_filter, vec_candidates, text_limit
+    pipeline_event(
+        "hybrid_retrieve.start",
+        use_vector=use_vector,
+        use_text=use_text,
+        top_k=top_k,
+        vec_candidates=vec_candidates,
+        text_limit=text_limit,
     )
 
-    # BM25 text search
-    text_query = {"$text": {"$search": query}}
-    if mongo_filter:
-        text_query.update(mongo_filter)
+    mongo_filter = get_query_filters(query, llm, collection)
 
-    text_results = list(
-        collection.find(
-            text_query,
-            {"text": 1, "metadata": 1, "embedding": 1, "text_score": {"$meta": "textScore"}}
+    vector_results = []
+    text_results = []
+
+    # Vector search (optional)
+    if use_vector:
+        query_embedding = _get_embedding(query, embedder)
+        vector_results = _vector_search(
+            query_embedding, collection, mongo_filter, vec_candidates, text_limit
         )
-        .sort([("text_score", {"$meta": "textScore"})])
-        .limit(text_limit)
+
+    # BM25 text search (optional)
+    if use_text:
+        text_query = {"$text": {"$search": query}}
+        if mongo_filter:
+            text_query.update(mongo_filter)
+
+        text_results = list(
+            collection.find(
+                text_query,
+                {"text": 1, "metadata": 1, "embedding": 1, "text_score": {"$meta": "textScore"}}
+            )
+            .sort([("text_score", {"$meta": "textScore"})])
+            .limit(text_limit)
+        )
+
+    if not (use_vector or use_text):
+        raise ValueError(
+            "Both vector and text search are disabled in config; enable at least one of 'use_vector' or 'use_text'."
+        )
+
+    pipeline_event(
+        "hybrid_retrieve.results",
+        vector_count=len(vector_results),
+        text_count=len(text_results),
     )
 
-    return _rrf_fuse([vector_results, text_results], top_k=top_k)
+    ranked_lists = [rl for rl in (vector_results, text_results) if rl]
+    if not ranked_lists:
+        pipeline_event("hybrid_retrieve.empty")
+        return []
+
+    fused = _rrf_fuse(ranked_lists, top_k=top_k)
+    pipeline_event("hybrid_retrieve.fused", fused_count=len(fused))
+    return fused
 
 
 def mmr(
@@ -226,7 +262,10 @@ def mmr(
     lambda_param = lambda_param or cfg["mmr_lambda"]
     top_k        = top_k        or cfg["stage2_k"]
 
+    pipeline_event("mmr.start", lambda_param=lambda_param, top_k=top_k, input_docs=len(documents))
+
     if not documents:
+        pipeline_event("mmr.empty")
         return documents
 
     # Pre-compute ALL embeddings as a single matrix — one numpy op
@@ -276,7 +315,9 @@ def mmr(
         )
         selected_indices.append(best_doc_idx)
 
-    return [documents[i] for i in selected_indices]
+    selected = [documents[i] for i in selected_indices]
+    pipeline_event("mmr.selected", selected_count=len(selected))
+    return selected
 
 
 # ============================================================
@@ -304,7 +345,7 @@ class MongoHybridRetriever(BaseRetriever):
     embedder:   object   # SentenceTransformer
     llm:        object   # LangChain LLM
     collection: object   # pymongo Collection
-    use_mmr:    bool = True
+    use_mmr:    bool = CFG["retrieval"].get("use_mmr", True)
 
     class Config:
         arbitrary_types_allowed = True
@@ -317,14 +358,22 @@ class MongoHybridRetriever(BaseRetriever):
     ) -> List[Document]:
 
         cfg = CFG["retrieval"]
+        print(query,": Before")
 
-        cfg_query=CFG['query_rewriting']
-        if cfg_query['default_strategy'] == "hyde":
-            query = hyde_rewrite(query , self.llm)
-        elif cfg_query['default_strategy'] == "multi":
-            query = multi_query_rewrite(query , self.llm)
+        cfg_query = CFG.get('query_rewriting', {})
+        strategy = cfg_query.get('default_strategy', 'stepback')
+        logger.info("Query rewrite strategy configured: %s", strategy)
+        if strategy == "hyde" and cfg_query.get('allow_hyde', True):
+            query = hyde_rewrite(query, self.llm)
+        elif strategy == "multi" and cfg_query.get('allow_multi', True):
+            query = multi_query_rewrite(query, self.llm)
+        elif strategy == "stepback" and cfg_query.get('allow_stepback', True):
+            query = stepback_rewrite(query, self.llm)
         else:
-            query = stepback_rewrite(query , self.llm)
+            # no rewrite applied (strategy disabled or unknown)
+            query = query
+
+        print(query,": After")
 
         print("multi:")
 

@@ -21,6 +21,7 @@ from langchain_core.documents import Document
 from sentence_transformers import CrossEncoder
 
 from src.config import CFG
+from src.utils.logger import pipeline_logger as logger, pipeline_event
 
 
 # ============================================================
@@ -53,8 +54,10 @@ class CrossEncoderReranker(Runnable):
         **kwargs,
     ) -> List[Document]:
 
-        query     = input["query"]
+        query = input["query"]
         documents = input["documents"]
+
+        pipeline_event("reranker.ce.invoke", query_len=len(query or ""), docs=len(documents), top_k=self.top_k)
 
         if not documents:
             return documents
@@ -74,7 +77,8 @@ class CrossEncoderReranker(Runnable):
             reverse=True
         )
 
-        return reranked[:self.top_k]
+        pipeline_event("reranker.ce.results", reranked_count=len(reranked))
+        return reranked[: self.top_k]
 
 
 # ============================================================
@@ -108,8 +112,10 @@ class LLMListwiseReranker(Runnable):
         **kwargs,
     ) -> List[Document]:
 
-        query     = input["query"]
+        query = input["query"]
         documents = input["documents"]
+
+        pipeline_event("reranker.llm.invoke", docs=len(documents), top_k=self.top_k)
 
         if not documents or len(documents) <= self.top_k:
             return documents[:self.top_k]
