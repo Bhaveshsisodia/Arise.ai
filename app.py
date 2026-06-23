@@ -25,19 +25,19 @@ os.environ["GROQ_API_KEY"]      = os.getenv("GROQ_API_KEY")
 os.environ["LANGCHAIN_API_KEY"] = os.getenv("LANGCHAIN_API_KEY")  # optional
 
 # ── Build the chain (loads models, connects to MongoDB) ────────
-from src.chain import build_chain,  ask_stream # , ask
+from src.chain import build_chain,  ask_stream  , ask
 
 chain = build_chain(use_llm_reranker=True)
 
 # # ── Ask a question ─────────────────────────────────────────────
-# answer = ask(
-#     "What employee expenses has JUSNL projected?",
-#     chain
-# )
+answer = ask(
+    "What employee expenses has JUSNL projected?",
+    chain
+)
 
 # ── Streaming version ──────────────────────────────────────────
 ask_stream(
-    "What ARR has JUSNL projected for FY 2025-26?",
+    "What employee expenses has JUSNL projected?",
     chain
 )
 
@@ -56,7 +56,7 @@ llm      = get_llm()
 retriever = MongoHybridRetriever(
     embedder=embedder, llm=llm, collection=collection
 )
-docs = retriever.invoke("What ARR has JUSNL projected for FY 2025-26?")
+docs = retriever.invoke("What employee expenses has JUSNL projected?")
 
 print(f"Retrieved {len(docs)} documents")
 for i, doc in enumerate(docs[:3], 1):

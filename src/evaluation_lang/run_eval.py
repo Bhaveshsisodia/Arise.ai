@@ -74,23 +74,23 @@
 #     return {"answer": ai_msg.content, "documents": docs}
 
 # correctness_eval = CorrectnessEvaluator(
-#     llm=llm_loader("gemini"),
-#     model_name="gemini"
+#     llm=llm_loader("OpenAI"),
+#     model_name="OpenAI"
 # )
 
 # relevance_eval = RelevanceEvaluator(
-#     llm=llm_loader("gemini"),
-#     model_name="gemini"
+#     llm=llm_loader("OpenAI"),
+#     model_name="OpenAI"
 # )
 
 # groundedness_eval = GroundednessEvaluator(
-#     llm=llm_loader("gemini"),
-#     model_name="gemini"
+#     llm=llm_loader("OpenAI"),
+#     model_name="OpenAI"
 # )
 
 # retrieval_relevance_eval = RetrievalRelevanceEvaluator(
-#     llm=llm_loader("gemini"),
-#     model_name="gemini"
+#     llm=llm_loader("OpenAI"),
+#     model_name="OpenAI"
 # )
 
 # def target(inputs: dict) -> dict:
@@ -104,7 +104,7 @@
 #     data=CFG["Evaluation"]["eval_name"],
 #     evaluators=[correctness_eval, relevance_eval, groundedness_eval, retrieval_relevance_eval],
 #     experiment_prefix="rag-doc-relevance",
-#     metadata={"version": "LCEL context, gemini_chatgptoss"},
+#     metadata={"version": "LCEL context, OpenAI_chatgptoss"},
 # )
 
 # src/evaluation_lang/run_eval.py
@@ -125,6 +125,7 @@ from src.retriever import MongoHybridRetriever
 from src.evaluation_lang.evaluators import *
 from src.evaluation_lang.llm_loader import llm_loader
 from src.utils.logger import eval_logger as logger, eval_event
+from src.reranker import CrossEncoderReranker, LLMListwiseReranker
 
 
 class EvalRunner:
@@ -165,24 +166,85 @@ class EvalRunner:
             use_mmr=use_mmr_cfg,
         )
 
+        # Rerankers (Stage 2: cross-encoder, Stage 3: LLM listwise)
+        use_ce = self.cfg.get("reranker", {}).get("use_ce", True)
+        use_llm_rerank = self.cfg.get("reranker", {}).get("use_llm", True)
+
+        try:
+            self.ce_reranker = CrossEncoderReranker() if use_ce else None
+        except Exception:
+            logger.exception("Failed to instantiate CrossEncoderReranker")
+            self.ce_reranker = None
+
+        try:
+            self.llm_reranker = LLMListwiseReranker(llm=self.llm) if use_llm_rerank else None
+        except Exception:
+            logger.exception("Failed to instantiate LLMListwiseReranker")
+            self.llm_reranker = None
+
         # evaluators
         self.correctness_eval = CorrectnessEvaluator(
-            llm=llm_loader("gemini"), model_name="gemini"
+            llm=llm_loader("OpenAI"), model_name="OpenAI"
         )
         self.relevance_eval = RelevanceEvaluator(
-            llm=llm_loader("gemini"), model_name="gemini"
+            llm=llm_loader("OpenAI"), model_name="OpenAI"
         )
         self.groundedness_eval = GroundednessEvaluator(
-            llm=llm_loader("gemini"), model_name="gemini"
+            llm=llm_loader("OpenAI"), model_name="OpenAI"
         )
         self.retrieval_relevance_eval = RetrievalRelevanceEvaluator(
-            llm=llm_loader("gemini"), model_name="gemini"
+            llm=llm_loader("OpenAI"), model_name="OpenAI"
         )
 
     @traceable()
     def rag_bot(self, question: str) -> dict:
         docs = self.retriever.invoke(question)
-        docs_string = "".join(doc.page_content for doc in docs)
+
+        # Get full candidate list from retriever; we'll apply rerankers first
+        # and only truncate to the final `stage3_k` afterwards so both
+        # Cross-Encoder and LLM listwise rerankers see the intended input set.
+        docs_list = list(docs)
+        docs_string = "".join(doc.page_content for doc in docs_list)
+
+        # Stage 2: Cross-encoder reranking (optional, controlled by config)
+        if getattr(self, "ce_reranker", None) is not None and docs_list:
+            try:
+                logger.info("Applying CrossEncoderReranker: docs=%s", len(docs_list))
+                docs_list = self.ce_reranker.invoke({"query": question, "documents": docs_list})
+                eval_event("rag_bot.ce_reranked", docs=len(docs_list))
+            except Exception:
+                logger.exception("Cross-encoder reranking failed — continuing with original order")
+
+        # Stage 3: LLM listwise reranking (optional, controlled by config)
+        if getattr(self, "llm_reranker", None) is not None and docs_list:
+            try:
+                logger.info("Applying LLMListwiseReranker: docs=%s", len(docs_list))
+                docs_list = self.llm_reranker.invoke({"query": question, "documents": docs_list})
+                eval_event("rag_bot.llm_reranked", docs=len(docs_list))
+            except Exception:
+                logger.exception("LLM listwise reranking failed — falling back to cross-encoder order")
+
+        # After reranking, enforce final document count (stage3_k) so the
+        # prompted context sent to the LLM is bounded. This preserves the
+        # intent of running rerankers on the larger candidate set but keeps
+        # the model input size controlled.
+        doc_limit = self.cfg.get("retrieval", {}).get("stage3_k", 5)
+        if len(docs_list) > doc_limit:
+            logger.info(
+                "Truncating documents after reranking: original=%s, keep=%s",
+                len(docs_list),
+                doc_limit,
+            )
+            eval_event(
+                "rag_bot.truncated_after_rerank",
+                original_docs=len(docs_list),
+                truncated_docs=doc_limit,
+            )
+            docs_list = docs_list[:doc_limit]
+
+        # Rebuild context after reranking and truncation
+        docs_string = "".join(doc.page_content for doc in docs_list)
+
         instructions = f"""You are a helpful assistant who is good at analyzing source information and answering questions.
 Use the following source documents to answer the user's questions. If you don't know the answer, say you don't know. Use three sentences maximum and be concise.
 
@@ -190,13 +252,20 @@ Use the following source documents to answer the user's questions. If you don't 
 {docs_string}
 </context>"""
 
-        ai_msg = self.llm.invoke(
-            [
-                {"role": "system", "content": instructions},
-                {"role": "user", "content": question},
-            ]
-        )
-        return {"answer": ai_msg.content, "documents": docs}
+        # Call LLM with defensive error handling so evaluators always get a stable response
+        try:
+            ai_msg = self.llm.invoke(
+                [
+                    {"role": "system", "content": instructions},
+                    {"role": "user", "content": question},
+                ]
+            )
+            answer = getattr(ai_msg, "content", str(ai_msg))
+        except Exception as e:
+            logger.exception("LLM invocation failed: %s", e)
+            answer = f"LLM error: {type(e).__name__}: {e}"
+
+        return {"answer": answer, "documents": docs_list}
 
     def target(self, inputs: dict) -> dict:
         return self.rag_bot(inputs["question"])
@@ -212,7 +281,7 @@ Use the following source documents to answer the user's questions. If you don't 
                 self.retrieval_relevance_eval,
             ],
             experiment_prefix=experiment_prefix,
-            metadata={"version": "LCEL context, gemini_chatgptoss"},
+            metadata={"version": "LCEL context, OpenAI_chatgptoss"},
         )
         return results
 

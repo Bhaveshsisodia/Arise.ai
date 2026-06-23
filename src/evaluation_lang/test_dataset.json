@@ -1,29 +1,27 @@
 [
-        {
-            "inputs": {
-                "question": "What is JUSNL?"
-            },
-            "outputs": {
-                "answer": "Jharkhand Urja Sancharan Nigam Limited (JUSNL) is the State Transmission Utility responsible for power transmission in Jharkhand."
-            }
+    {
+        "inputs": {
+            "question": "What is JUSNL?"
         },
-        {
-            "inputs": {
-                "question": "What employee expenses has JUSNL projected?"
-            },
-            "outputs": {
-                "answer": "JUSNL projected total employee expenses of Rs. 107.54 Crore for FY 2025-26."
-            }
+        "outputs": {
+            "answer": "Jharkhand Urja Sancharan Nigam Limited (JUSNL) is the State Transmission Utility responsible for power transmission in Jharkhand."
+        }
+    },
+    {
+        "inputs": {
+            "question": "What employee expenses has JUSNL projected for FY 2025-26?"
         },
-
-        {
-            "inputs": {
-                "question": "What A&G expenses has JUSNL projected?"
-            },
-            "outputs": {
-                "answer": "JUSNL projected A&G expenses of Rs. 25.45 Crore."
-            }
+        "outputs": {
+            "answer": "JUSNL projected total employee expenses of Rs. 107.54 Crore for FY 2025-26, comprising Employee Expenses of Rs. 87.79 Crore and Terminal Benefits of Rs. 19.75 Crore."
+        }
+    },
+    {
+        "inputs": {
+            "question": "What A&G expenses has JUSNL projected for FY 2025-26?"
+        },
+        "outputs": {
+            "answer": "JUSNL projected A&G expenses of Rs. 25.45 Crore for FY 2025-26, calculated by escalating FY 2024-25 A&G expenses by an inflation factor of 6.09%."
         }
 
-
-    ]
+    }
+]

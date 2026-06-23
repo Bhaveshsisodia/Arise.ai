@@ -31,6 +31,10 @@ from langchain_core.documents import Document
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
 
+from langchain_classic.retrievers import ContextualCompressionRetriever
+
+# 2. Import your chosen compressor from langchain-community or langchain-classic
+from langchain_classic.retrievers.document_compressors.chain_extract import LLMChainExtractor
 from src.config import CFG
 from src.vector_db import collection
 from src.retriever import MongoHybridRetriever
@@ -136,14 +140,17 @@ def build_chain(use_llm_reranker: bool = True):
     use_mmr_cfg = CFG["retrieval"].get("use_mmr", True)
     use_ce_cfg = CFG.get("reranker", {}).get("use_ce", True)
     use_llm_cfg = CFG.get("reranker", {}).get("use_llm", True)
+    cont_comp_cfg = CFG["retrieval"].get("context_compression", True)
 
     logger.info(
-        "build_chain | embed_model=%s use_mmr=%s use_ce=%s use_llm=%s llm_model=%s",
+        "build_chain | embed_model=%s use_mmr=%s use_ce=%s use_llm=%s llm_model=%s context_compression=%s",
         CFG["embedding"]["model"],
         use_mmr_cfg,
         use_ce_cfg,
         use_llm_cfg,
         CFG["llm"]["model"],
+        cont_comp_cfg
+
     )
     from src.utils.logger import pipeline_event
     pipeline_event(
@@ -153,6 +160,7 @@ def build_chain(use_llm_reranker: bool = True):
         use_ce=use_ce_cfg,
         use_llm=use_llm_cfg,
         llm_model=CFG["llm"]["model"],
+        context_compression = cont_comp_cfg
     )
 
     retriever = MongoHybridRetriever(
@@ -161,6 +169,28 @@ def build_chain(use_llm_reranker: bool = True):
         collection=collection,
         use_mmr=use_mmr_cfg,
     )
+
+# OR if using another compressor (e.g., LLMLingua):
+# from langchain_community.document_compressors import LLMLinguaCompressor
+
+# 3. Setup your workflow
+
+    compressor = LLMChainExtractor.from_llm(llm)
+
+    # 4. Wrap your base vector store retriever
+    compression_retriever = ContextualCompressionRetriever(
+        base_compressor=compressor,
+        base_retriever=retriever
+    )
+    retrieval_engine = (
+    compression_retriever
+    if cont_comp_cfg
+    else retriever)
+
+    logger.info(
+    "Retriever Used: %s",
+    retrieval_engine.__class__.__name__)
+
 
     ce_reranker = CrossEncoderReranker() if use_ce_cfg else None
     llm_reranker = LLMListwiseReranker(llm=llm) if use_llm_cfg else None
@@ -181,7 +211,7 @@ def build_chain(use_llm_reranker: bool = True):
 
     # Stage 1: retrieve
     stage1 = RunnablePassthrough.assign(
-        documents = RunnableLambda(lambda x: retriever.invoke(x["question"])).with_config({"run_name": "Stage1-Retrieval"})
+        documents = RunnableLambda(lambda x: retrieval_engine.invoke(x["question"])).with_config({"run_name": "Stage1-Retrieval"})
     )
 
     # Stage 2: cross-encoder rerank (optional)
@@ -206,6 +236,10 @@ def build_chain(use_llm_reranker: bool = True):
         stage3 = RunnablePassthrough()
 
     # Context formatting + generation
+    # Ensure the final output is a plain string regardless of LLM message object.
+    # Some LLM implementations return AIMessage-like objects; normalise them
+    # to a string before returning so downstream callers and LangSmith see
+    # consistent output instead of `null`.
     generation = (
         RunnablePassthrough.assign(
             context = RunnableLambda(lambda x: build_context(x["documents"]))
@@ -213,6 +247,7 @@ def build_chain(use_llm_reranker: bool = True):
         | RAG_PROMPT
         | llm
         | output_parser
+        | RunnableLambda(lambda out: out if isinstance(out, str) else getattr(out, "content", str(out)))
     )
 
     # Full chain
@@ -246,10 +281,21 @@ def ask(question: str, chain=None) -> str:
     print(f"\nQuestion: {question}")
     print("=" * 60)
 
-    answer = chain.invoke({"question": question})
+    try:
+        answer = chain.invoke({"question": question})
+    except Exception as e:
+        logger.exception("Chain invocation failed: %s", e)
+        print("Chain invocation raised an exception:", type(e).__name__, e)
+        return f"Chain error: {type(e).__name__}: {e}"
+
+    # Defensive diagnostics: ensure callers see something useful rather than None
+    if answer is None:
+        logger.warning("Chain returned None for question: %s", question)
+        print("Chain returned None — check LangSmith trace for step errors.")
+        return "Chain returned no output (None) — check logs"
 
     print("\nAnswer:")
-    print(answer)
+    print(repr(answer))
     return answer
 
 
@@ -274,4 +320,11 @@ def ask_stream(question: str, chain=None):
     for chunk in chain.stream({"question": question}):
         print(chunk, end="", flush=True)
 
-    print()
+    try:
+        answer = chain.invoke({"question": question})
+    except Exception as e:
+        logger.exception("Chain invocation failed: %s", e)
+        print("Chain invocation raised an exception:", type(e).__name__, e)
+        return f"Chain error: {type(e).__name__}: {e}"
+
+    return answer

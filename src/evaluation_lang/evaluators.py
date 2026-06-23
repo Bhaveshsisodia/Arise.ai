@@ -14,51 +14,35 @@ class CorrectnessGrade(TypedDict):
 # ============================================================
 
 correctness_instructions = """
-You are an expert evaluator for Indian power sector regulatory documents.
+You are evaluating a Retrieval Augmented Generation (RAG) system.
 
-You will be given:
+You will receive:
 
-1. QUESTION
-2. GROUND TRUTH ANSWER
-3. STUDENT ANSWER
+QUESTION
+GROUND TRUTH ANSWER
+STUDENT ANSWER
 
-Evaluate whether the STUDENT ANSWER is factually correct relative to the GROUND TRUTH.
+Your task is to determine whether the STUDENT ANSWER correctly answers the QUESTION.
 
 Rules:
 
-- Focus ONLY on factual correctness.
-- Ignore writing style, grammar, formatting, and verbosity.
-- Additional information is acceptable if factually correct.
-- Check carefully:
-  - Numerical values
-  - Financial years (FY)
-  - ARR values
-  - Tariff values
-  - Employee expenses
-  - A&G expenses
-  - Regulatory references
-  - Company/entity names
-  - Petition details
+1. The STUDENT ANSWER does NOT need to exactly match the wording of the GROUND TRUTH.
 
-Scoring Rubric:
+2. Paraphrases, equivalent wording, synonyms, abbreviations, and alternate descriptions should be treated as correct.
 
-5 = Completely correct
+3. Additional information is acceptable if it is factually correct and does not contradict the ground truth.
 
-4 = Mostly correct with minor omissions
+4. Minor differences in wording should NOT affect correctness.
 
-3 = Partially correct
+5. Only mark incorrect if:
+   - the answer is factually wrong
+   - the answer contradicts the ground truth
+   - the answer fails to answer the question
 
-2 = Mostly incorrect
-
-1 = Completely incorrect
-
-Return:
-1. explanation
-2. score
-
-Think step-by-step before assigning a score.
+Output:
+- explanation
+- correct (true/false)
 """
-
 
 
 
@@ -160,44 +144,16 @@ class RelevanceGrade(TypedDict):
 # ============================================================
 # Instructions
 # ============================================================
+relevance_instructions = """You are a teacher grading a quiz. You will be given a QUESTION and a STUDENT ANSWER. Here is the grade criteria to follow:
+(1) Ensure the STUDENT ANSWER is concise and relevant to the QUESTION
+(2) Ensure the STUDENT ANSWER helps to answer the QUESTION
 
-relevance_instructions = """
-You are an expert evaluator for Question Answering systems.
+Relevance:
+A relevance value of True means that the student's answer meets all of the criteria.
+A relevance value of False means that the student's answer does not meet all of the criteria.
 
-You will be given:
+Explain your reasoning in a step-by-step manner to ensure your reasoning and conclusion are correct. Avoid simply stating the correct answer at the outset."""
 
-1. QUESTION
-2. STUDENT ANSWER
-
-Your task is to evaluate how well the answer addresses the question.
-
-Evaluation Rules:
-
-- The answer should directly address the user's question.
-- The answer should contain information relevant to the question.
-- The answer should not be off-topic.
-- The answer should not avoid answering the question.
-- Completeness should be considered.
-- Ignore grammar, formatting, and writing style.
-
-Scoring Rubric:
-
-5 = Fully answers the question directly and completely
-
-4 = Mostly answers the question with minor missing details
-
-3 = Partially answers the question
-
-2 = Weakly related to the question
-
-1 = Does not answer the question or is irrelevant
-
-Return:
-1. explanation
-2. score
-
-Think step-by-step before assigning a score.
-"""
 
 
 # ============================================================
@@ -266,50 +222,14 @@ class GroundedGrade(TypedDict):
 # Instructions
 # ============================================================
 
-grounded_instructions = """
-You are an expert evaluator for Retrieval Augmented Generation (RAG) systems.
+grounded_instructions = """You are a teacher grading a quiz. You will be given FACTS and a STUDENT ANSWER. Here is the grade criteria to follow:
+(1) Ensure the STUDENT ANSWER is grounded in the FACTS. (2) Ensure the STUDENT ANSWER does not contain "hallucinated" information outside the scope of the FACTS.
 
-You will be given:
+Grounded:
+A grounded value of True means that the student's answer meets all of the criteria.
+A grounded value of False means that the student's answer does not meet all of the criteria.
 
-1. RETRIEVED CONTEXT
-2. STUDENT ANSWER
-
-Your task is to determine whether the answer is supported by the retrieved context.
-
-Evaluation Rules:
-
-- Every factual claim in the answer should be supported by the context.
-- Do not use outside knowledge.
-- If the answer contains information not found in the context, penalize it.
-- If the answer contradicts the context, heavily penalize it.
-- Minor rewording is acceptable.
-- Focus on:
-  - Numerical values
-  - Financial years
-  - ARR values
-  - Employee expenses
-  - Regulatory references
-  - Entity names
-  - Petition details
-
-Scoring Rubric:
-
-5 = Completely grounded in context
-
-4 = Mostly grounded with minor unsupported details
-
-3 = Partially grounded
-
-2 = Significant unsupported information
-
-1 = Hallucinated or contradicted by context
-
-Return:
-1. explanation
-2. score
-
-Think step-by-step before assigning a score.
-"""
+Explain your reasoning in a step-by-step manner to ensure your reasoning and conclusion are correct. Avoid simply stating the correct answer at the outset."""
 
 
 # ============================================================
@@ -386,55 +306,16 @@ class RetrievalRelevanceGrade(TypedDict):
 # Instructions
 # ============================================================
 
-retrieval_relevance_instructions = """
-You are an expert evaluator for Retrieval Augmented Generation (RAG) systems.
+retrieval_relevance_instructions = """You are a teacher grading a quiz. You will be given a QUESTION and a set of FACTS provided by the student. Here is the grade criteria to follow:
+(1) You goal is to identify FACTS that are completely unrelated to the QUESTION
+(2) If the facts contain ANY keywords or semantic meaning related to the question, consider them relevant
+(3) It is OK if the facts have SOME information that is unrelated to the question as long as (2) is met
 
-You will be given:
+Relevance:
+A relevance value of True means that the FACTS contain ANY keywords or semantic meaning related to the QUESTION and are therefore relevant.
+A relevance value of False means that the FACTS are completely unrelated to the QUESTION.
 
-1. QUESTION
-2. RETRIEVED CONTEXT
-
-Your task is to determine whether the retrieved context is relevant for answering the question.
-
-Evaluation Rules:
-
-- Focus only on retrieval quality.
-- Determine whether the retrieved documents contain information useful for answering the question.
-- Documents do not need to contain the exact answer.
-- Documents may contain additional unrelated information.
-- If the retrieved context contains keywords, concepts, entities, financial years, regulations, or semantic meaning related to the question, consider it relevant.
-- Penalize retrieval only when most of the context is unrelated.
-
-For regulatory tariff petitions pay special attention to:
-- Utility names (JUSNL, JBVNL, etc.)
-- ARR values
-- Employee expenses
-- O&M expenses
-- Depreciation
-- RoE
-- Capital expenditure
-- Tariff proposals
-- Financial years
-- Regulatory references
-
-Scoring Rubric:
-
-5 = Highly relevant; contains the information needed to answer
-
-4 = Mostly relevant with minor irrelevant content
-
-3 = Partially relevant
-
-2 = Weakly relevant
-
-1 = Completely irrelevant
-
-Return:
-1. explanation
-2. score
-
-Think step-by-step before assigning a score.
-"""
+Explain your reasoning in a step-by-step manner to ensure your reasoning and conclusion are correct. Avoid simply stating the correct answer at the outset."""
 
 
 # ============================================================
