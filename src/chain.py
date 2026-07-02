@@ -75,14 +75,14 @@ def _get_embedder() -> SentenceTransformer:
 
 
 @lru_cache(maxsize=4)
-def build_chain_components(use_llm_reranker: bool = True) -> Dict[str, Any]:
+def build_chain_components(use_llm_reranker: bool = False) -> Dict[str, Any]:
     """Build the chain once and reuse heavy components across requests."""
     setup_langsmith()
 
     use_mmr_cfg = CFG["retrieval"].get("use_mmr", True)
     use_ce_cfg = CFG.get("reranker", {}).get("use_ce", True)
-    use_llm_cfg = CFG.get("reranker", {}).get("use_llm", True)
-    context_compression = CFG["retrieval"].get("context_compression", True)
+    use_llm_cfg = CFG.get("reranker", {}).get("use_llm", False)
+    context_compression = CFG["retrieval"].get("context_compression", False)
 
     embedder = _get_embedder()
     llm = get_llm()
@@ -95,11 +95,6 @@ def build_chain_components(use_llm_reranker: bool = True) -> Dict[str, Any]:
     )
 
     retrieval_engine = retriever
-    if context_compression:
-        retrieval_engine = ContextualCompressionRetriever(
-            base_compressor=LLMChainExtractor.from_llm(llm),
-            base_retriever=retriever,
-        )
 
     ce_reranker = CrossEncoderReranker() if use_ce_cfg else None
     llm_reranker = LLMListwiseReranker(llm=llm) if use_llm_cfg else None
@@ -167,13 +162,13 @@ def build_chain_components(use_llm_reranker: bool = True) -> Dict[str, Any]:
     }
 
 
-def build_chain(use_llm_reranker: bool = True):
+def build_chain(use_llm_reranker: bool = False):
     """Return the answer-only runnable."""
     return build_chain_components(use_llm_reranker)["chain"]
 
 
 def ask_with_sources(
-    question: str, use_llm_reranker: bool = True, max_sources: int = 5
+    question: str, use_llm_reranker: bool = False, max_sources: int = 5
 ) -> Dict[str, Any]:
     response_chain = build_chain_components(use_llm_reranker)["response_chain"]
     result = response_chain.invoke({"question": question})

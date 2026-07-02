@@ -1,5 +1,7 @@
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from src.chain import ask_with_sources, build_chain_components
@@ -7,6 +9,8 @@ from src.chain import ask_with_sources, build_chain_components
 load_dotenv()
 
 app = FastAPI(title="Arise RAG API", version="1.0.0")
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
 build_chain_components(use_llm_reranker=True)
 
 
@@ -31,6 +35,11 @@ class AnswerResponse(BaseModel):
 @app.get("/health")
 def health():
     return {"status": "ok", "message": "Arise RAG API is running"}
+
+
+@app.get("/chat")
+def chat_page(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
 
 
 @app.post("/ask", response_model=AnswerResponse)

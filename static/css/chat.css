@@ -1,0 +1,17 @@
+body { font-family: Arial, sans-serif; margin: 0; padding: 0; background: #f5f7fb; color: #111; }
+.page { max-width: 850px; margin: 0 auto; padding: 24px; }
+h1 { margin-bottom: 8px; }
+.chat-box { background: white; border-radius: 14px; padding: 18px; box-shadow: 0 8px 24px rgba(0,0,0,.08); }
+.messages { min-height: 360px; margin-bottom: 16px; overflow-y: auto; display: flex; flex-direction: column; }
+.message { margin-bottom: 14px; padding: 12px 14px; border-radius: 12px; line-height: 1.5; }
+.user { background: #e8f0ff; align-self: flex-end; }
+.bot { background: #f0f4ff; }
+.error { background: #ffe4e6; color: #82131a; }
+.message strong { display: block; margin-bottom: 6px; }
+.footer { display: flex; gap: 8px; }
+input[type="text"] { flex: 1; min-width: 0; padding: 12px 14px; border: 1px solid #d1d8df; border-radius: 999px; outline: none; }
+button { padding: 12px 18px; border: none; border-radius: 999px; background: #0055ff; color: white; cursor: pointer; }
+button:disabled { background: #9bb3ff; cursor: not-allowed; }
+.sources { margin-top: 12px; font-size: 0.95rem; color: #3c4a60; }
+.source-item { margin-bottom: 10px; padding: 10px 12px; background: #f7f8fb; border-radius: 10px; }
+.meta { font-size: 0.88rem; color: #65748b; }

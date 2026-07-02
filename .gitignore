@@ -219,3 +219,6 @@ __marimo__/
 
 data/
 logs/
+research/
+research/hybrid-search-and-reranking-cohere-in-the-rag.ipynb
+research/rag-fusion.ipynb
