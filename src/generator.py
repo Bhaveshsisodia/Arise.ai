@@ -9,6 +9,7 @@ Usage:
 """
 
 import os
+from functools import lru_cache
 from typing import List
 
 from langchain_core.documents import Document
@@ -26,6 +27,7 @@ load_dotenv()
 # LLM
 # ============================================================
 
+@lru_cache(maxsize=1)
 def get_llm() -> ChatGroq:
     """
     Returns a configured ChatGroq LLM instance.
@@ -89,12 +91,9 @@ Use ONLY the provided context to answer the question.
 If the answer is not in the context, say:
 "Information not available in retrieved documents."
 
-For every answer provide:
-1. Direct answer with specific figures/data where available
-2. Sources:
-   - Section: [section heading]
-   - Pages: [page range]
-   - Relevance score: [score if available]
+Provide a concise, direct answer only.
+Do not list sources or include any provenance in the answer.
+Sources will be returned separately.
 
 Context:
 {context}

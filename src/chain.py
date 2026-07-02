@@ -1,167 +1,91 @@
 """
-chain.py — LCEL chain assembly + LangSmith tracing.
-
-This is the core of the refactor. Your existing pipeline:
-
-    hybrid_retrieve() → mmr() → stage2_crossencoder_rerank()
-    → stage3_llm_listwise_rerank() → build_context() → llm
-
-Becomes a composable LCEL chain:
-
-    retriever | ce_reranker | llm_reranker | prompt | llm | parser
-
-Why LCEL?
-  - Every | step is a Runnable — composable, streamable, traceable
-  - LangSmith automatically traces every step when env vars are set
-  - .stream() works out of the box for token-by-token streaming
-  - Easy to swap any component (e.g. different retriever or LLM)
-
-Usage:
-    from src.chain import build_chain, ask
-
-    chain = build_chain()
-    answer = ask("What employee expenses has JUSNL projected?", chain)
+chain.py - LCEL chain assembly + LangSmith tracing.
 """
 
 import os
-from typing import List, Dict, Any
+from functools import lru_cache
+from typing import Any, Dict, List
 
-from langchain_core.runnables import RunnablePassthrough, RunnableLambda
-from langchain_core.documents import Document
-from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
-
+from langchain_core.documents import Document
+from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 from langchain_classic.retrievers import ContextualCompressionRetriever
+from langchain_classic.retrievers.document_compressors.chain_extract import (
+    LLMChainExtractor,
+)
+from langsmith import traceable
+from sentence_transformers import SentenceTransformer
 
-# 2. Import your chosen compressor from langchain-community or langchain-classic
-from langchain_classic.retrievers.document_compressors.chain_extract import LLMChainExtractor
 from src.config import CFG
-from src.vector_db import collection
-from src.retriever import MongoHybridRetriever
+from src.generator import RAG_PROMPT, build_context, get_llm, output_parser
 from src.reranker import CrossEncoderReranker, LLMListwiseReranker
-from src.generator import get_llm, build_context, RAG_PROMPT, output_parser
+from src.retriever import MongoHybridRetriever
 from src.utils.logger import pipeline_logger as logger
+from src.vector_db import collection
 
 load_dotenv()
 
 
-# ============================================================
-# LANGSMITH TRACING SETUP
-# Just set these two env vars → every chain call is traced.
-# No other code changes needed.
-#
-# Add to your .env:
-#   LANGCHAIN_TRACING_V2=true
-#   LANGCHAIN_API_KEY=your_langsmith_key
-#   LANGCHAIN_PROJECT=jusnl-rag
-# ============================================================
-
-def setup_langsmith():
-    """
-    Activates LangSmith tracing if env vars are present.
-    Safe to call even if LangSmith is not configured —
-    it will just skip tracing silently.
-    """
+def setup_langsmith() -> None:
+    """Enable LangSmith tracing when credentials are available."""
     if os.getenv("LANGCHAIN_API_KEY"):
         os.environ["LANGCHAIN_TRACING_V2"] = "true"
-        os.environ["LANGCHAIN_PROJECT"]     = os.getenv(
-            "LANGCHAIN_PROJECT", "jusnl-rag"
+        os.environ["LANGCHAIN_PROJECT"] = os.getenv("LANGCHAIN_PROJECT", "jusnl-rag")
+
+
+def _normalize_output(output: Any) -> str:
+    if isinstance(output, str):
+        return output
+    return getattr(output, "content", str(output))
+
+
+def _apply_ce_reranker(inputs: Dict[str, Any], reranker: CrossEncoderReranker) -> List[Document]:
+    return reranker.invoke(
+        {"query": inputs["question"], "documents": inputs["documents"]}
+    )
+
+
+def _apply_llm_reranker(inputs: Dict[str, Any], reranker: LLMListwiseReranker) -> List[Document]:
+    return reranker.invoke(
+        {"query": inputs["question"], "documents": inputs["documents"]}
+    )
+
+
+def _build_sources(documents: List[Document], max_sources: int) -> List[Dict[str, Any]]:
+    sources = []
+    for doc in documents[:max_sources]:
+        meta = doc.metadata
+        sources.append(
+            {
+                "section": meta.get("section_heading", "Unknown"),
+                "pages": f"{meta.get('page_start', '?')}-{meta.get('page_end', '?')}",
+                "cross_encoder_score": meta.get("cross_encoder_score"),
+                "llm_rank": meta.get("llm_rank"),
+                "snippet": doc.page_content[:250].replace("\n", " "),
+            }
         )
-        print("✅ LangSmith tracing enabled")
-    else:
-        print("ℹ️  LangSmith not configured — set LANGCHAIN_API_KEY to enable tracing")
+    return sources
 
 
-# ============================================================
-# RERANKER ADAPTER
-# The rerankers expect {"query": str, "documents": List[Document]}
-# but the LCEL chain passes state as a dict.
-# This adapter extracts the right fields.
-# ============================================================
-
-def _apply_ce_reranker(input: Dict[str, Any], reranker: CrossEncoderReranker) -> List[Document]:
-    return reranker.invoke({
-        "query":     input["question"],
-        "documents": input["documents"],
-    })
-
-def _apply_llm_reranker(input: Dict[str, Any], reranker: LLMListwiseReranker) -> List[Document]:
-    return reranker.invoke({
-        "query":     input["question"],
-        "documents": input["documents"],
-    })
+@lru_cache(maxsize=1)
+def _get_embedder() -> SentenceTransformer:
+    model_name = CFG["embedding"]["model"]
+    logger.info("Loading embedding model: %s", model_name)
+    return SentenceTransformer(model_name)
 
 
-# ============================================================
-# CHAIN BUILDER
-# ============================================================
-
-def build_chain(use_llm_reranker: bool = True):
-    """
-    Assembles the full 3-stage RAG chain using LCEL.
-
-    Pipeline:
-        Input: {"question": str}
-            ↓
-        Meta Data Filtering
-            ↓
-        retriever        → List[Document]  (Stage 1: hybrid RRF + MMR)
-            ↓
-        ce_reranker      → List[Document]  (Stage 2: cross-encoder)
-            ↓
-        llm_reranker     → List[Document]  (Stage 3: LLM listwise)
-            ↓
-        build_context    → str             (format docs into context)
-            ↓
-        RAG_PROMPT       → ChatPromptValue (insert context + question)
-            ↓
-        llm              → AIMessage       (generate answer)
-            ↓
-        output_parser    → str             (extract content)
-
-    Args:
-        use_llm_reranker: set False to skip Stage 3 (faster, saves LLM call)
-
-    Returns:
-        Runnable LCEL chain
-    """
+@lru_cache(maxsize=4)
+def build_chain_components(use_llm_reranker: bool = True) -> Dict[str, Any]:
+    """Build the chain once and reuse heavy components across requests."""
     setup_langsmith()
 
-    # ── Load models ───────────────────────────────────────────
-    print("Loading embedding model...")
-    embedder = SentenceTransformer(CFG["embedding"]["model"])
-    print(f"✅ Embedder loaded | dim={embedder.get_sentence_embedding_dimension()}")
-
-    llm = get_llm()
-    print(f"✅ LLM loaded | model={CFG['llm']['model']}")
-
-    # ── Instantiate components ────────────────────────────────
-    # read toggles from config
     use_mmr_cfg = CFG["retrieval"].get("use_mmr", True)
     use_ce_cfg = CFG.get("reranker", {}).get("use_ce", True)
     use_llm_cfg = CFG.get("reranker", {}).get("use_llm", True)
-    cont_comp_cfg = CFG["retrieval"].get("context_compression", True)
+    context_compression = CFG["retrieval"].get("context_compression", True)
 
-    logger.info(
-        "build_chain | embed_model=%s use_mmr=%s use_ce=%s use_llm=%s llm_model=%s context_compression=%s",
-        CFG["embedding"]["model"],
-        use_mmr_cfg,
-        use_ce_cfg,
-        use_llm_cfg,
-        CFG["llm"]["model"],
-        cont_comp_cfg
-
-    )
-    from src.utils.logger import pipeline_event
-    pipeline_event(
-        "chain.build",
-        embed_model=CFG["embedding"]["model"],
-        use_mmr=use_mmr_cfg,
-        use_ce=use_ce_cfg,
-        use_llm=use_llm_cfg,
-        llm_model=CFG["llm"]["model"],
-        context_compression = cont_comp_cfg
-    )
+    embedder = _get_embedder()
+    llm = get_llm()
 
     retriever = MongoHybridRetriever(
         embedder=embedder,
@@ -170,51 +94,32 @@ def build_chain(use_llm_reranker: bool = True):
         use_mmr=use_mmr_cfg,
     )
 
-# OR if using another compressor (e.g., LLMLingua):
-# from langchain_community.document_compressors import LLMLinguaCompressor
-
-# 3. Setup your workflow
-
-    compressor = LLMChainExtractor.from_llm(llm)
-
-    # 4. Wrap your base vector store retriever
-    compression_retriever = ContextualCompressionRetriever(
-        base_compressor=compressor,
-        base_retriever=retriever
-    )
-    retrieval_engine = (
-    compression_retriever
-    if cont_comp_cfg
-    else retriever)
-
-    logger.info(
-    "Retriever Used: %s",
-    retrieval_engine.__class__.__name__)
-
+    retrieval_engine = retriever
+    if context_compression:
+        retrieval_engine = ContextualCompressionRetriever(
+            base_compressor=LLMChainExtractor.from_llm(llm),
+            base_retriever=retriever,
+        )
 
     ce_reranker = CrossEncoderReranker() if use_ce_cfg else None
     llm_reranker = LLMListwiseReranker(llm=llm) if use_llm_cfg else None
 
-    # ── LCEL chain definition ─────────────────────────────────
-    #
-    # RunnablePassthrough() keeps "question" flowing through
-    # while we add "documents" and "context" at each step.
-    #
-    # Step by step:
-    #   1. {"question": q} → retriever → {"question": q, "documents": [...]}
-    #   2. ce_reranker re-scores documents
-    #   3. llm_reranker globally re-orders documents
-    #   4. build_context formats docs → context string
-    #   5. RAG_PROMPT inserts context + question
-    #   6. llm generates answer
-    #   7. output_parser extracts string
-
-    # Stage 1: retrieve
-    stage1 = RunnablePassthrough.assign(
-        documents = RunnableLambda(lambda x: retrieval_engine.invoke(x["question"])).with_config({"run_name": "Stage1-Retrieval"})
+    logger.info(
+        "build_chain | embed_model=%s use_mmr=%s use_ce=%s use_llm=%s llm_model=%s context_compression=%s",
+        CFG["embedding"]["model"],
+        use_mmr_cfg,
+        use_ce_cfg,
+        use_llm_cfg,
+        CFG["llm"]["model"],
+        context_compression,
     )
 
-    # Stage 2: cross-encoder rerank (optional)
+    stage1 = RunnablePassthrough.assign(
+        documents=RunnableLambda(
+            lambda x: retrieval_engine.invoke(x["question"])
+        ).with_config({"run_name": "Stage1-Retrieval"})
+    )
+
     if ce_reranker is not None:
         stage2 = RunnablePassthrough.assign(
             documents=RunnableLambda(
@@ -224,9 +129,7 @@ def build_chain(use_llm_reranker: bool = True):
     else:
         stage2 = RunnablePassthrough()
 
-    # Stage 3: LLM listwise rerank (optional via config)
-    final_use_llm = use_llm_reranker and (llm_reranker is not None)
-    if final_use_llm:
+    if use_llm_reranker and llm_reranker is not None:
         stage3 = RunnablePassthrough.assign(
             documents=RunnableLambda(
                 lambda x: _apply_llm_reranker(x, llm_reranker)
@@ -235,96 +138,64 @@ def build_chain(use_llm_reranker: bool = True):
     else:
         stage3 = RunnablePassthrough()
 
-    # Context formatting + generation
-    # Ensure the final output is a plain string regardless of LLM message object.
-    # Some LLM implementations return AIMessage-like objects; normalise them
-    # to a string before returning so downstream callers and LangSmith see
-    # consistent output instead of `null`.
-    generation = (
-        RunnablePassthrough.assign(
-            context = RunnableLambda(lambda x: build_context(x["documents"]))
-        )
+    generation_chain = (
+        RunnableLambda(lambda x: {"context": x["context"], "question": x["question"]})
         | RAG_PROMPT
         | llm
         | output_parser
-        | RunnableLambda(lambda out: out if isinstance(out, str) else getattr(out, "content", str(out)))
+        | RunnableLambda(_normalize_output)
     )
 
-    # Full chain
-    chain = stage1 | stage2 | stage3 | generation
+    response_chain = (
+        stage1
+        | stage2
+        | stage3
+        | RunnablePassthrough.assign(
+            context=RunnableLambda(lambda x: build_context(x["documents"]))
+        )
+        | RunnablePassthrough.assign(answer=generation_chain)
+    ).with_config({"run_name": "JUSNL-RAG-Pipeline"})
 
-    return chain.with_config({
-    "run_name": "JUSNL-RAG-Pipeline"   # ← this becomes the parent in LangSmith
-})
+    answer_chain = response_chain | RunnableLambda(lambda x: x["answer"])
+
+    return {
+        "chain": answer_chain,
+        "response_chain": response_chain,
+        "retrieval_engine": retrieval_engine,
+        "ce_reranker": ce_reranker,
+        "llm_reranker": llm_reranker,
+    }
 
 
-# ============================================================
-# PUBLIC ask() FUNCTION
-# ============================================================
-from langsmith import traceable
+def build_chain(use_llm_reranker: bool = True):
+    """Return the answer-only runnable."""
+    return build_chain_components(use_llm_reranker)["chain"]
+
+
+def ask_with_sources(
+    question: str, use_llm_reranker: bool = True, max_sources: int = 5
+) -> Dict[str, Any]:
+    response_chain = build_chain_components(use_llm_reranker)["response_chain"]
+    result = response_chain.invoke({"question": question})
+    return {
+        "answer": result["answer"],
+        "sources": _build_sources(result["documents"], max_sources),
+    }
+
 
 @traceable(name="JUSNL-RAG-Pipeline")
 def ask(question: str, chain=None) -> str:
-    """
-    Ask a question and get an answer from the full RAG pipeline.
-
-    Args:
-        question: natural language question
-        chain:    pre-built LCEL chain (builds one if not provided)
-
-    Returns:
-        str — LLM answer grounded in retrieved documents
-    """
-    if chain is None:
-        chain = build_chain()
-
-    print(f"\nQuestion: {question}")
-    print("=" * 60)
+    """Ask a question and return a grounded answer."""
+    chain = chain or build_chain()
 
     try:
         answer = chain.invoke({"question": question})
-    except Exception as e:
-        logger.exception("Chain invocation failed: %s", e)
-        print("Chain invocation raised an exception:", type(e).__name__, e)
-        return f"Chain error: {type(e).__name__}: {e}"
+    except Exception as exc:
+        logger.exception("Chain invocation failed: %s", exc)
+        return f"Chain error: {type(exc).__name__}: {exc}"
 
-    # Defensive diagnostics: ensure callers see something useful rather than None
     if answer is None:
         logger.warning("Chain returned None for question: %s", question)
-        print("Chain returned None — check LangSmith trace for step errors.")
-        return "Chain returned no output (None) — check logs"
-
-    print("\nAnswer:")
-    print(repr(answer))
-    return answer
-
-
-# ============================================================
-# STREAMING VERSION
-# Works out of the box because every step is a Runnable.
-# No extra code needed — LCEL handles it automatically.
-# ============================================================
-@traceable(name="JUSNL-RAG-Pipeline-Stream")
-
-def ask_stream(question: str, chain=None):
-    """
-    Same as ask() but streams tokens as they arrive.
-    Useful for Streamlit or FastAPI streaming endpoints.
-    """
-    if chain is None:
-        chain = build_chain()
-
-    print(f"\nQuestion: {question}")
-    print("=" * 60)
-
-    for chunk in chain.stream({"question": question}):
-        print(chunk, end="", flush=True)
-
-    try:
-        answer = chain.invoke({"question": question})
-    except Exception as e:
-        logger.exception("Chain invocation failed: %s", e)
-        print("Chain invocation raised an exception:", type(e).__name__, e)
-        return f"Chain error: {type(e).__name__}: {e}"
+        return "Chain returned no output (None) - check logs"
 
     return answer

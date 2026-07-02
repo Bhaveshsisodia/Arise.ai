@@ -358,7 +358,7 @@ class MongoHybridRetriever(BaseRetriever):
     ) -> List[Document]:
 
         cfg = CFG["retrieval"]
-        print(query,": Before")
+        original_query = query
 
         cfg_query = CFG.get('query_rewriting', {})
         strategy = cfg_query.get('default_strategy', 'stepback')
@@ -373,14 +373,8 @@ class MongoHybridRetriever(BaseRetriever):
             # no rewrite applied (strategy disabled or unknown)
             query = query
 
-        print(query,": After")
-
-        print("multi:")
-
-
-
-
-
+        if query != original_query:
+            logger.info("Query rewritten | strategy=%s", strategy)
 
         # Stage 1: Hybrid RRF
         candidates = hybrid_retrieve(

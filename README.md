@@ -398,6 +398,37 @@ Benefits:
 
 # Maximum Marginal Relevance (MMR)
 
+---
+
+## Indexing & setup
+
+Follow these steps to prepare the environment and index documents into MongoDB:
+
+1. Copy `.env.example` to `.env` and fill in real secrets (DO NOT commit `.env`).
+
+2. Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+3. Run a dry-run to preview what will be indexed:
+
+```bash
+python scripts/index_data.py --data-dir data/petitions/collection/petition_chunks --dry-run
+```
+
+4. Index files for real:
+
+```bash
+python scripts/index_data.py --data-dir data/petitions/collection/petition_chunks
+```
+
+Notes:
+- The script supports `.txt` and `.jsonl` files by default; extend it for PDFs or other source formats.
+- Adjust `--chunk-size` and `--overlap` to tune retrieval granularity.
+
+
 MMR removes redundant chunks.
 
 Balances:

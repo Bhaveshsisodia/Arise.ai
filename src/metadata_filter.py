@@ -1,31 +1,56 @@
 """
 metadata_filter.py — LLM-based metadata filter extraction.
 
-Converts a natural language query into a MongoDB filter dict
-by asking the LLM to extract structured metadata from the query
-and validating it against the live catalog of values in the DB.
+Converts a natural language query into a MongoDB $vectorSearch filter dict.
+
+Key facts about your Atlas vector index:
+  Fields declared as "type: filter" in your index:
+    ✅ metadata.discom
+    ✅ metadata.filing_year
+    ✅ metadata.section_heading
+    ✅ metadata.section_num
+    ✅ metadata.main_section
+    ✅ metadata.document_type
+    ✅ metadata.commission
+    ❌ metadata.cost_head  ← NOT in index, removed from filtering
+
+  $vectorSearch only filters on fields declared in the index.
+  Filtering on an undeclared field = 0 results silently.
 
 Usage:
-    from src.filters import get_query_filters
+    from src.metadata_filter import get_query_filters
     mongo_filter = get_query_filters(query, llm, collection)
 """
 
 import json
 import re
 from typing import Optional
-
 from pydantic import BaseModel
 
 
 # ============================================================
+# FILTER CACHE
+# get_query_filters() makes one LLM call per query.
+# In combined_retrieve(), 4 sub-retrievers call it for the
+# same query → 4 identical LLM calls wasted.
+# Cache by query string → call LLM only once per unique query.
+# ============================================================
+
+_filter_cache: dict = {}
+
+def clear_filter_cache():
+    """Call between sessions to reset cache."""
+    _filter_cache.clear()
+
+
+# ============================================================
 # PYDANTIC MODEL
-# Defines which metadata fields can be filtered.
-# Add new fields here if your schema grows.
+# ONLY fields that exist in your Atlas vector index.
+# cost_head removed — not in index, causes silent 0 results.
 # ============================================================
 
 class QueryFilters(BaseModel):
     semantic_query:  str
-    cost_head:       Optional[str] = None
     document_type:   Optional[str] = None
     discom:          Optional[str] = None
     filing_year:     Optional[str] = None
@@ -37,106 +62,106 @@ class QueryFilters(BaseModel):
 
 # ============================================================
 # DYNAMIC CATALOG
-# Reads distinct metadata values live from MongoDB.
-# Only keeps fields that have >1 unique value (otherwise filtering
-# on them doesn't narrow results at all).
+# Reads distinct values live from MongoDB.
+# Only includes fields that:
+#   1. Are declared in your Atlas vector index (can be filtered)
+#   2. Have more than 1 distinct value (otherwise filter is useless)
 # ============================================================
 
+# Fields that exist in your Atlas vector index as "type: filter"
+_INDEXED_FILTER_FIELDS = [
+    "document_type",
+    "discom",
+    "filing_year",
+    "section_heading",
+    "section_num",
+    "main_section",
+    "commission",
+]
+
 def build_dynamic_catalog(collection) -> dict:
-    fields = [
-        "document_type", "discom", "section_num",
-        "main_section", "filing_year", "commission",
-        "cost_head", "section_heading",
-    ]
+    """
+    Builds a catalog of filterable metadata values from MongoDB.
+    Only queries fields that are actually indexed for filtering.
+    """
     catalog = {}
-    for field in fields:
+    for field in _INDEXED_FILTER_FIELDS:
         values = collection.distinct(f"metadata.{field}")
+        # Skip fields with 0 or 1 value — filtering on them narrows nothing
         if len(values) > 1:
-            catalog[field] = values
+            catalog[field] = sorted(values)  # sorted for consistent prompt
     return catalog
 
 
 # ============================================================
-# PROMPT BUILDER
+# PROMPT
 # ============================================================
 
 def build_filter_prompt(user_query: str, metadata_catalog: dict) -> str:
     return f"""
 You are an expert query understanding engine for a Power Sector Regulatory Assistant.
 
-Available metadata values:
+Available metadata values in the database:
 
 {json.dumps(metadata_catalog, indent=2)}
 
 Your task:
 
 1. Understand the user's intent.
-2. Extract ONLY metadata explicitly mentioned or strongly implied.
-3. Never guess metadata.
+2. Extract ONLY metadata explicitly mentioned or strongly implied by the query.
+3. Never guess metadata not present in the query.
 4. If metadata is not present, do not include it.
 5. Rewrite the question into a concise semantic search query.
-6. Return ONLY valid JSON.
-7. Do not add explanations.
-8. Do not wrap output in markdown.
+6. Return ONLY valid JSON — no markdown, no explanation.
 
-Metadata meanings:
-
-- cost_head:
-  Financial category such as employee_expense, depreciation, roe, interest, arr, capex.
+Field meanings:
 
 - document_type:
-  petition, tariff_order, regulation, trueup_order etc.
+  Type of regulatory document: petition, tariff_order, regulation, trueup_order etc.
 
 - filing_year:
-  MUST exactly match one of the values in the available metadata above.
-  Common formats: "FY24", "FY25", "FY26" or "FY 2024-25" etc.
-  Always pick from the catalog values, never invent a value.
+  MUST exactly match one of the values in the catalog above.
+  Common formats: "FY24", "FY25", "FY 2024-25" etc.
+  Never invent a value not in the catalog.
 
 - discom:
-  Utility name such as JUSNL.
+  Utility name e.g. JUSNL. Only include if explicitly mentioned.
 
 - commission:
-  Regulatory commission such as JSERC.
+  Regulatory body e.g. JSERC. Only include if explicitly mentioned.
 
 - section_num:
-  Section identifier such as 1.1, 2.1, 5.5.
+  Section identifier e.g. "1.1", "2.1", "5.5".
+  Only include if user explicitly references a section number.
 
 - main_section:
-  Top-level chapter such as
-  "1. Introduction",
-  "2. Regulatory Framework",
-  "5. ARR and Tariff Proposal".
+  Top-level chapter e.g. "1. Introduction", "5. ARR and Tariff Proposal".
+  Only include if user explicitly references a chapter.
 
 - section_heading:
-  Complete section title such as:
-  "1.4. Rationale for filing of Instant Petition"
-  "5.5. Operation and Maintenance Expenses"
-  "3.8. Return on Equity"
+  Complete section title e.g. "1.4. Rationale for filing of Instant Petition".
+  Only include if user asks about a specific named section.
 
 Examples:
 
-Question: What does section 2.1 say?
+Query: What does section 2.1 say?
 Output:
-{{
-  "semantic_query": "section 2.1",
-  "section_num": "2.1"
-}}
+{{"semantic_query": "section 2.1 content", "section_num": "2.1"}}
 
-Question: What is JUSNL?
+Query: What is JUSNL?
 Output:
-{{
-  "semantic_query": "JUSNL profile background"
-}}
+{{"semantic_query": "JUSNL profile background"}}
 
-Question: Show me the rationale for filing of instant petition
+Query: Show me the rationale for filing of instant petition
 Output:
-{{
-  "semantic_query": "rationale for filing instant petition",
-  "section_heading": "1.4. Rationale for filing of Instant Petition"
-}}
+{{"semantic_query": "rationale filing instant petition", "section_heading": "1.4. Rationale for filing of Instant Petition"}}
 
-{user_query}
-"""
+Query: What ARR has JUSNL projected for FY 2025-26?
+Output:
+{{"semantic_query": "ARR projected FY 2025-26", "discom": "JUSNL"}}
+
+Query: {user_query}
+Output:"""
 
 
 # ============================================================
@@ -152,13 +177,18 @@ def parse_json_response(text: str) -> dict:
 
 # ============================================================
 # MONGO FILTER BUILDER
-# Converts ParsedFilters → MongoDB filter dict.
-# Skips fields whose value is "other" (not meaningful for filtering).
+# Converts Pydantic model → MongoDB filter dict.
+# Only includes fields that are non-None.
 # ============================================================
 
 def build_mongo_filter(parsed: QueryFilters) -> dict:
-    mongo_filter = {}
+    """
+    Converts parsed QueryFilters → MongoDB filter dict.
 
+    All fields here are guaranteed to exist in your Atlas
+    vector index as 'type: filter' — safe to use in $vectorSearch.
+    """
+    mongo_filter = {}
 
     if parsed.document_type:
         mongo_filter["metadata.document_type"] = parsed.document_type
@@ -185,22 +215,46 @@ def build_mongo_filter(parsed: QueryFilters) -> dict:
 
 
 # ============================================================
-# MAIN PUBLIC FUNCTION
+# PUBLIC FUNCTION
 # ============================================================
 
 def get_query_filters(user_query: str, llm, collection) -> dict:
     """
-    Full pipeline:
-      1. Build dynamic catalog from MongoDB
-      2. Ask LLM to extract structured filters
-      3. Validate with Pydantic
-      4. Convert to MongoDB filter dict
+    Extracts MongoDB filter dict from a natural language query.
+
+    Pipeline:
+      1. Check cache — return immediately if query seen before
+      2. Build dynamic catalog from MongoDB (indexed fields only)
+      3. Ask LLM to extract structured filters
+      4. Validate with Pydantic
+      5. Convert to MongoDB filter dict
+      6. Cache result for future calls
+
+    Args:
+        user_query: natural language question
+        llm:        LangChain LLM instance
+        collection: pymongo Collection
 
     Returns:
         dict — MongoDB filter ready for $vectorSearch or find()
+        Empty dict {} means no filter — full collection search.
     """
+    # Check cache first
+    if user_query in _filter_cache:
+        return _filter_cache[user_query]
+
+    # Build catalog, extract filters, validate
     catalog  = build_dynamic_catalog(collection)
     prompt   = build_filter_prompt(user_query, catalog)
     response = llm.invoke(prompt)
-    parsed   = QueryFilters(**parse_json_response(response.content))
-    return build_mongo_filter(parsed)
+
+    try:
+        parsed = QueryFilters(**parse_json_response(response.content))
+        result = build_mongo_filter(parsed)
+    except Exception as e:
+        print(f"⚠️  Filter extraction failed ({e}) — using no filter")
+        result = {}
+
+    # Cache and return
+    _filter_cache[user_query] = result
+    return result

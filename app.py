@@ -1,65 +1,50 @@
-"""
-usage_in_colab.py
------------------
-Drop this in a Colab cell to use the new modular chain.
-Assumes you've cloned the project and installed requirements.
-
-Setup in Colab:
-    !git clone https://github.com/yourusername/jusnl-rag
-    %cd jusnl-rag
-    !pip install -r requirements.txt
-
-Add secrets in Colab (left sidebar → key icon):
-    MONGO_URI          = your MongoDB Atlas connection string
-    GROQ_API_KEY       = your Groq API key
-    LANGCHAIN_API_KEY  = your LangSmith API key (optional)
-    LANGCHAIN_PROJECT  = jusnl-rag
-"""
-
-import os
 from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+from src.chain import ask_with_sources, build_chain_components
+
 load_dotenv()
-# Load secrets from Colab's secure secrets store
-os.environ["MONGO_URI"]         = os.getenv("MONGO_URI")
-os.environ["GROQ_API_KEY"]      = os.getenv("GROQ_API_KEY")
-os.environ["LANGCHAIN_API_KEY"] = os.getenv("LANGCHAIN_API_KEY")  # optional
 
-# ── Build the chain (loads models, connects to MongoDB) ────────
-from src.chain import build_chain,  ask_stream  , ask
+app = FastAPI(title="Arise RAG API", version="1.0.0")
+build_chain_components(use_llm_reranker=True)
 
-chain = build_chain(use_llm_reranker=True)
 
-# # ── Ask a question ─────────────────────────────────────────────
-answer = ask(
-    "What employee expenses has JUSNL projected?",
-    chain
-)
+class QuestionRequest(BaseModel):
+    question: str
 
-# ── Streaming version ──────────────────────────────────────────
-ask_stream(
-    "What employee expenses has JUSNL projected?",
-    chain
-)
 
-# ── Access intermediate results (for debugging) ────────────────
-# The chain returns the final string answer,
-# but you can inspect individual stages:
+class SourceItem(BaseModel):
+    section: str
+    pages: str
+    cross_encoder_score: float | None = None
+    llm_rank: int | None = None
+    snippet: str
 
-from src.retriever import MongoHybridRetriever
-from src.vector_db import collection
-from sentence_transformers import SentenceTransformer
-from src.generator import get_llm
 
-embedder = SentenceTransformer("BAAI/bge-large-en-v1.5")
-llm      = get_llm()
+class AnswerResponse(BaseModel):
+    answer: str
+    sources: list[SourceItem]
+    status: str = "ok"
 
-retriever = MongoHybridRetriever(
-    embedder=embedder, llm=llm, collection=collection
-)
-docs = retriever.invoke("What employee expenses has JUSNL projected?")
 
-print(f"Retrieved {len(docs)} documents")
-for i, doc in enumerate(docs[:3], 1):
-    print(f"\n[{i}] {doc.metadata.get('section_heading')}")
-    print(f"     RRF score: {doc.metadata.get('rrf_score')}")
-    print(f"     {doc.page_content[:150]}...")
+@app.get("/health")
+def health():
+    return {"status": "ok", "message": "Arise RAG API is running"}
+
+
+@app.post("/ask", response_model=AnswerResponse)
+def ask_question(payload: QuestionRequest):
+    if not payload.question or not payload.question.strip():
+        raise HTTPException(status_code=400, detail="Question cannot be empty")
+
+    try:
+        response = ask_with_sources(payload.question, use_llm_reranker=True)
+        return AnswerResponse(**response)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
