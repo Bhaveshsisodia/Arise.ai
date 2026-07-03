@@ -5,7 +5,16 @@ const button = document.getElementById('send');
 function addMessage(role, text) {
     const el = document.createElement('div');
     el.className = 'message ' + role;
-    el.innerHTML = `<strong>${role === 'user' ? 'You' : role === 'bot' ? 'Assistant' : 'Error'}</strong>${text}`;
+
+    const label = document.createElement('strong');
+    label.textContent = role === 'user' ? 'You' : role === 'bot' ? 'Assistant' : 'Error';
+    el.appendChild(label);
+
+    const content = document.createElement('div');
+    content.className = 'message-text';
+    content.textContent = text;
+    el.appendChild(content);
+
     messages.appendChild(el);
     messages.scrollTop = messages.scrollHeight;
 }

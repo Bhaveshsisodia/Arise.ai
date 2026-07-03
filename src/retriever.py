@@ -362,7 +362,14 @@ class MongoHybridRetriever(BaseRetriever):
 
         cfg_query = CFG.get('query_rewriting', {})
         strategy = cfg_query.get('default_strategy', 'stepback')
-        logger.info("Query rewrite strategy configured: %s", strategy)
+        pipeline_event(
+            "query_rewrite.strategy",
+            strategy=strategy,
+            allow_hyde=cfg_query.get('allow_hyde', True),
+            allow_multi=cfg_query.get('allow_multi', True),
+            allow_stepback=cfg_query.get('allow_stepback', True),
+        )
+
         if strategy == "hyde" and cfg_query.get('allow_hyde', True):
             query = hyde_rewrite(query, self.llm)
         elif strategy == "multi" and cfg_query.get('allow_multi', True):
@@ -372,6 +379,14 @@ class MongoHybridRetriever(BaseRetriever):
         else:
             # no rewrite applied (strategy disabled or unknown)
             query = query
+
+        pipeline_event(
+            "query_rewrite.attempt",
+            original_query=original_query,
+            rewritten_query=query,
+            strategy=strategy,
+            rewritten=query != original_query,
+        )
 
         if query != original_query:
             logger.info("Query rewritten | strategy=%s", strategy)

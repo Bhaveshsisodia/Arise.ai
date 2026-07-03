@@ -42,7 +42,7 @@ retrieval:
   context_compression: false          # RRF fusion constant
 
 query_rewriting:
-  default_strategy: ""   # "hyde" | "multi" | "stepback"
+  default_strategy: "hyde"   # "hyde" | "multi" | "stepback"
   allow_hyde: true
   allow_multi: true
   allow_stepback: true  # baseline | hyde | multi | stepback | combined

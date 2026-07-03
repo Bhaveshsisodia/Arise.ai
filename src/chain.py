@@ -9,6 +9,7 @@ from typing import Any, Dict, List
 from dotenv import load_dotenv
 from langchain_core.documents import Document
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_classic.retrievers import ContextualCompressionRetriever
 from langchain_classic.retrievers.document_compressors.chain_extract import (
     LLMChainExtractor,
@@ -18,6 +19,7 @@ from sentence_transformers import SentenceTransformer
 
 from src.config import CFG
 from src.generator import RAG_PROMPT, build_context, get_llm, output_parser
+from src.router import QueryRouter
 from src.reranker import CrossEncoderReranker, LLMListwiseReranker
 from src.retriever import MongoHybridRetriever
 from src.utils.logger import pipeline_logger as logger
@@ -96,6 +98,19 @@ def build_chain_components(use_llm_reranker: bool = False) -> Dict[str, Any]:
 
     retrieval_engine = retriever
 
+    # Router: decide whether to run retrieval or a chat-only flow
+    router = QueryRouter(llm=llm)
+
+    def _route_and_retrieve(question: str):
+        try:
+            ds = router.route(question)
+        except Exception:
+            ds = "retrieval"
+        if ds == "retrieval":
+            return retrieval_engine.invoke(question)
+        # chat route: return empty list (no documents)
+        return []
+
     ce_reranker = CrossEncoderReranker() if use_ce_cfg else None
     llm_reranker = LLMListwiseReranker(llm=llm) if use_llm_cfg else None
 
@@ -111,8 +126,9 @@ def build_chain_components(use_llm_reranker: bool = False) -> Dict[str, Any]:
 
     stage1 = RunnablePassthrough.assign(
         documents=RunnableLambda(
-            lambda x: retrieval_engine.invoke(x["question"])
-        ).with_config({"run_name": "Stage1-Retrieval"})
+            lambda x: _route_and_retrieve(x["question"])
+        ).with_config({"run_name": "Stage1-RetrievalOrChat"}),
+        datasource=RunnableLambda(lambda x: router.route(x["question"]))
     )
 
     if ce_reranker is not None:
@@ -133,10 +149,33 @@ def build_chain_components(use_llm_reranker: bool = False) -> Dict[str, Any]:
     else:
         stage3 = RunnablePassthrough()
 
+    def _generate_using_llm(inputs: Dict[str, Any]):
+        question = inputs["question"]
+        datasource = inputs.get("datasource", "retrieval")
+        try:
+            if datasource == "chat":
+                # simple chat prompt for conversational queries
+                chat_prompt = ChatPromptTemplate.from_template(
+                    """
+You are a helpful assistant.
+
+Question:
+{question}
+"""
+                )
+                prompt = chat_prompt.format_prompt(question=question)
+                resp = llm.invoke(prompt)
+            else:
+                context = build_context(inputs.get("documents", []))
+                prompt = RAG_PROMPT.format_prompt(context=context, question=question)
+                resp = llm.invoke(prompt)
+            return resp
+        except Exception as e:
+            logger.exception("LLM generation failed: %s", e)
+            raise
+
     generation_chain = (
-        RunnableLambda(lambda x: {"context": x["context"], "question": x["question"]})
-        | RAG_PROMPT
-        | llm
+        RunnableLambda(_generate_using_llm)
         | output_parser
         | RunnableLambda(_normalize_output)
     )
