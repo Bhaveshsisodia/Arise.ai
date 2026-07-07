@@ -8,15 +8,28 @@
 </head>
 <body>
     <div class="page">
-        <h1>Arise Document Chat</h1>
-        <p>Ask questions about the document and get grounded answers with retrieval sources.</p>
-        <div class="chat-box">
+        <header class="hero">
+            <div class="hero-copy">
+                <p class="eyebrow">Grounded AI Assistant</p>
+                <h1>Arise Document Chat</h1>
+                <p class="hero-description">
+                    Ask questions about your regulatory documents and get precise, source-backed answers in a beautiful chat interface.
+                </p>
+            </div>
+            <div class="hero-badge">
+                <span>RAG + Streaming</span>
+                <span>Sources Included</span>
+                <span>Production UI</span>
+            </div>
+        </header>
+
+        <main class="chat-card">
             <div id="messages" class="messages"></div>
             <div class="footer">
                 <input id="question" type="text" placeholder="Ask your question..." autocomplete="off" />
                 <button id="send">Send</button>
             </div>
-        </div>
+        </main>
     </div>
     <script src="/static/js/chat.js"></script>
 </body>

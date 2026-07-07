@@ -44,6 +44,7 @@ uvicorn
 
 # Utils
 python-dotenv
+redis
 pandas
 numpy==1.26.4
 qdrant-client==1.9.0

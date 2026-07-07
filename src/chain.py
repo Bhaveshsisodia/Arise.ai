@@ -15,7 +15,14 @@ from langchain_classic.retrievers.document_compressors.chain_extract import (
     LLMChainExtractor,
 )
 from langsmith import traceable
-from sentence_transformers import SentenceTransformer
+
+try:
+    from sentence_transformers import SentenceTransformer
+except Exception as exc:  # pragma: no cover - optional dependency at runtime
+    SentenceTransformer = None
+    _SENTENCE_TRANSFORMERS_IMPORT_ERROR = exc
+else:
+    _SENTENCE_TRANSFORMERS_IMPORT_ERROR = None
 
 from src.config import CFG
 from src.generator import RAG_PROMPT, build_context, get_llm, output_parser
@@ -23,9 +30,14 @@ from src.router import QueryRouter
 from src.reranker import CrossEncoderReranker, LLMListwiseReranker
 from src.retriever import MongoHybridRetriever
 from src.utils.logger import pipeline_logger as logger
+from src.utils.redis_cache import build_cache_key, get_redis_cache
 from src.vector_db import collection
+import re
 
 load_dotenv()
+
+_SEMANTIC_CACHE_THRESHOLD = float(CFG.get("redis", {}).get("semantic_similarity_threshold", 0.92))
+_SEMANTIC_CACHE_ENABLED = bool(CFG.get("redis", {}).get("semantic_enabled", True))
 
 
 def setup_langsmith() -> None:
@@ -37,8 +49,13 @@ def setup_langsmith() -> None:
 
 def _normalize_output(output: Any) -> str:
     if isinstance(output, str):
-        return output
-    return getattr(output, "content", str(output))
+        text = output
+    else:
+        text = getattr(output, "content", str(output))
+    # normalize citation style: keep [n] only, remove internal range markers like †L1-L4
+    text = re.sub(r"\[(\d+)†L\d+-L\d+\]", r"[\1]", text)
+    text = re.sub(r"†L\d+-L\d+", "", text)
+    return text
 
 
 def _apply_ce_reranker(inputs: Dict[str, Any], reranker: CrossEncoderReranker) -> List[Document]:
@@ -55,15 +72,27 @@ def _apply_llm_reranker(inputs: Dict[str, Any], reranker: LLMListwiseReranker) -
 
 def _build_sources(documents: List[Document], max_sources: int) -> List[Dict[str, Any]]:
     sources = []
-    for doc in documents[:max_sources]:
+    for i, doc in enumerate(documents[:max_sources], start=1):
         meta = doc.metadata
+        document_title = (
+            meta.get("document_title")
+            or meta.get("document")
+            or meta.get("document_name")
+            or meta.get("file_name")
+            or meta.get("document_type")
+            or "Source Document"
+        )
         sources.append(
             {
+                "source_id": i,
+                "document_title": document_title,
                 "section": meta.get("section_heading", "Unknown"),
                 "pages": f"{meta.get('page_start', '?')}-{meta.get('page_end', '?')}",
+                "relevance": round(float(meta.get("cross_encoder_score", 0) or 0), 4),
                 "cross_encoder_score": meta.get("cross_encoder_score"),
                 "llm_rank": meta.get("llm_rank"),
                 "snippet": doc.page_content[:250].replace("\n", " "),
+                "content": doc.page_content,
             }
         )
     return sources
@@ -194,6 +223,7 @@ Question:
 
     return {
         "chain": answer_chain,
+        "answer_chain": answer_chain,
         "response_chain": response_chain,
         "retrieval_engine": retrieval_engine,
         "ce_reranker": ce_reranker,
@@ -209,12 +239,137 @@ def build_chain(use_llm_reranker: bool = False):
 def ask_with_sources(
     question: str, use_llm_reranker: bool = False, max_sources: int = 5
 ) -> Dict[str, Any]:
+    cache = get_redis_cache()
+    normalized_question = (question or "").strip()
+    cache_variant = build_cache_key("answer_variant", use_llm_reranker, max_sources)
+    cache_key = build_cache_key("answer", normalized_question, use_llm_reranker, max_sources)
+
+    cached_answer = cache.get_json("answer", cache_key)
+    if cached_answer is not None:
+        logger.info("Redis answer cache hit for question: %s", normalized_question)
+        return cached_answer
+
+    embedder = _get_embedder()
+    question_embedding = embedder.encode(normalized_question, normalize_embeddings=True).tolist()
+    if _SEMANTIC_CACHE_ENABLED:
+        cached_answer = cache.get_semantic_json(
+            "answer_semantic",
+            question_embedding,
+            min_similarity=_SEMANTIC_CACHE_THRESHOLD,
+            variant=cache_variant,
+        )
+        if cached_answer is not None:
+            logger.info("Redis semantic answer cache hit for question: %s", normalized_question)
+            return cached_answer
+
     response_chain = build_chain_components(use_llm_reranker)["response_chain"]
     result = response_chain.invoke({"question": question})
-    return {
+    payload = {
         "answer": result["answer"],
         "sources": _build_sources(result["documents"], max_sources),
     }
+
+    cache.set_json("answer", cache_key, payload, ttl=1800)
+    if _SEMANTIC_CACHE_ENABLED:
+        cache.set_semantic_json(
+            "answer_semantic",
+            cache_key,
+            query_text=normalized_question,
+            query_vector=question_embedding,
+            value=payload,
+            ttl=1800,
+            variant=cache_variant,
+        )
+    return payload
+
+
+def ask_stream(question: str, use_llm_reranker: bool = False):
+    answer_chain = build_chain_components(use_llm_reranker)["answer_chain"]
+    for chunk in answer_chain.stream({"question": question}):
+        if chunk is None:
+            continue
+
+        if isinstance(chunk, str):
+            yield _normalize_output(chunk)
+            continue
+
+        if isinstance(chunk, dict):
+            if "answer" in chunk and chunk["answer"] is not None:
+                yield _normalize_output(chunk["answer"])
+                continue
+            if "content" in chunk and chunk["content"] is not None:
+                yield _normalize_output(chunk["content"])
+                continue
+            continue
+
+        if hasattr(chunk, "content"):
+            content = getattr(chunk, "content")
+            if content is not None:
+                yield _normalize_output(content)
+                continue
+
+        if hasattr(chunk, "answer"):
+            answer = getattr(chunk, "answer")
+            if answer is not None:
+                yield _normalize_output(answer)
+                continue
+
+        yield _normalize_output(str(chunk))
+
+
+def ask_stream_with_sources(
+    question: str,
+    use_llm_reranker: bool = False,
+    max_sources: int = 5,
+):
+    response_chain = build_chain_components(use_llm_reranker)["response_chain"]
+    documents = None
+
+    for chunk in response_chain.stream({"question": question}):
+        if chunk is None:
+            continue
+
+        if isinstance(chunk, dict):
+            if documents is None and "documents" in chunk:
+                documents = chunk["documents"]
+
+            if "answer" in chunk and chunk["answer"] is not None:
+                yield {"type": "delta", "text": _normalize_output(chunk["answer"])}
+                continue
+            if "content" in chunk and chunk["content"] is not None:
+                yield {"type": "delta", "text": _normalize_output(chunk["content"])}
+                continue
+
+            # Ignore internal routing/context metadata chunks that are not actual answer text.
+            if set(chunk.keys()) <= {"question", "datasource", "documents", "context"}:
+                continue
+
+            # If the dict contains unknown fields, only emit if it has usable text.
+            if "text" in chunk and isinstance(chunk["text"], str):
+                yield {"type": "delta", "text": _normalize_output(chunk["text"])}
+                continue
+            continue
+
+        if isinstance(chunk, str):
+            yield {"type": "delta", "text": _normalize_output(chunk)}
+            continue
+
+        if hasattr(chunk, "content"):
+            content = getattr(chunk, "content")
+            if content is not None:
+                yield {"type": "delta", "text": _normalize_output(content)}
+                continue
+
+        if hasattr(chunk, "answer"):
+            answer = getattr(chunk, "answer")
+            if answer is not None:
+                yield {"type": "delta", "text": _normalize_output(answer)}
+                continue
+
+        # Ignore all other chunks that are not answer content.
+        continue
+
+    yield {"type": "sources", "sources": _build_sources(documents or [], max_sources)}
 
 
 @traceable(name="JUSNL-RAG-Pipeline")

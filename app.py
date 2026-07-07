@@ -1,17 +1,18 @@
 from dotenv import load_dotenv
+import json
+
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-from src.chain import ask_with_sources, build_chain_components
-
+from src.chain import ask_with_sources, ask_stream, ask_stream_with_sources
 load_dotenv()
 
 app = FastAPI(title="Arise RAG API", version="1.0.0")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
-build_chain_components(use_llm_reranker=True)
 
 
 class QuestionRequest(BaseModel):
@@ -19,11 +20,15 @@ class QuestionRequest(BaseModel):
 
 
 class SourceItem(BaseModel):
+    source_id: int | None = None
+    document_title: str
     section: str
     pages: str
+    relevance: float | None = None
     cross_encoder_score: float | None = None
     llm_rank: int | None = None
     snippet: str
+    content: str
 
 
 class AnswerResponse(BaseModel):
@@ -52,6 +57,25 @@ def ask_question(payload: QuestionRequest):
         return AnswerResponse(**response)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/ask/stream")
+def ask_question_stream(payload: QuestionRequest):
+    if not payload.question or not payload.question.strip():
+        raise HTTPException(status_code=400, detail="Question cannot be empty")
+
+    def stream_generator():
+        try:
+            for event in ask_stream_with_sources(payload.question, use_llm_reranker=True):
+                yield json.dumps(event) + "\n"
+        except Exception as exc:
+            yield json.dumps({"type": "error", "error": str(exc)}) + "\n"
+
+    return StreamingResponse(
+        stream_generator(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-transform"},
+    )
 
 
 if __name__ == "__main__":

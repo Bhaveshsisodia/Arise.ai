@@ -23,12 +23,23 @@ from typing import List , Optional
 from langchain_core.retrievers import BaseRetriever
 from langchain_core.documents import Document
 from langchain_core.callbacks import CallbackManagerForRetrieverRun
-from sentence_transformers import util
+
+try:
+    from sentence_transformers import util
+except Exception as exc:  # pragma: no cover - optional dependency at runtime
+    util = None
+    _SENTENCE_TRANSFORMERS_UTIL_IMPORT_ERROR = exc
+else:
+    _SENTENCE_TRANSFORMERS_UTIL_IMPORT_ERROR = None
 
 from src.config import CFG
 from src.utils.logger import pipeline_logger as logger, pipeline_event
 from src.metadata_filter import get_query_filters
 from src.query_optimizer import hyde_rewrite, multi_query_rewrite, stepback_rewrite
+from src.utils.redis_cache import build_cache_key, get_redis_cache
+
+_SEMANTIC_CACHE_THRESHOLD = float(CFG.get("redis", {}).get("semantic_similarity_threshold", 0.92))
+_SEMANTIC_CACHE_ENABLED = bool(CFG.get("redis", {}).get("semantic_enabled", True))
 
 # ============================================================
 # HELPER: dict → LangChain Document
@@ -391,6 +402,26 @@ class MongoHybridRetriever(BaseRetriever):
         if query != original_query:
             logger.info("Query rewritten | strategy=%s", strategy)
 
+        cache = get_redis_cache()
+        cache_variant = build_cache_key("retrieval_variant", cfg["stage1_k"], self.use_mmr)
+        cache_key = build_cache_key("retrieval", query, cfg["stage1_k"], self.use_mmr)
+        cached_candidates = cache.get_json("retrieval", cache_key)
+        if cached_candidates is not None:
+            logger.info("Redis retrieval cache hit for query: %s", query)
+            return [_to_document(doc) for doc in cached_candidates]
+
+        query_embedding = _get_embedding(query, self.embedder)
+        if _SEMANTIC_CACHE_ENABLED:
+            cached_candidates = cache.get_semantic_json(
+                "retrieval_semantic",
+                query_embedding,
+                min_similarity=_SEMANTIC_CACHE_THRESHOLD,
+                variant=cache_variant,
+            )
+            if cached_candidates is not None:
+                logger.info("Redis semantic retrieval cache hit for query: %s", query)
+                return [_to_document(doc) for doc in cached_candidates]
+
         # Stage 1: Hybrid RRF
         candidates = hybrid_retrieve(
             query      = query,
@@ -408,6 +439,19 @@ class MongoHybridRetriever(BaseRetriever):
                 embedder = self.embedder,
                 top_k    = cfg["stage1_k"],
             )
+
+        if candidates:
+            cache.set_json("retrieval", cache_key, candidates, ttl=1800)
+            if _SEMANTIC_CACHE_ENABLED:
+                cache.set_semantic_json(
+                    "retrieval_semantic",
+                    cache_key,
+                    query_text=query,
+                    query_vector=query_embedding,
+                    value=candidates,
+                    ttl=1800,
+                    variant=cache_variant,
+                )
 
         # Convert raw dicts → LangChain Documents
         return [_to_document(doc) for doc in candidates]

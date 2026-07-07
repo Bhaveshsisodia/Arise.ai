@@ -92,8 +92,11 @@ If the answer is not in the context, say:
 "Information not available in retrieved documents."
 
 Provide a concise, direct answer only.
-Do not list sources or include any provenance in the answer.
-Sources will be returned separately.
+Answer the question using ONLY the provided context.
+When you use facts from the context, cite the source block using square-bracketed numbers like [1], [2], [3].
+Do not add unrelated details, reasoning steps, or metadata.
+If the answer is not contained in the context, say exactly:
+"Information not available in retrieved documents."
 
 Context:
 {context}

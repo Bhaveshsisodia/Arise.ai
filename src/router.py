@@ -24,7 +24,7 @@ SYSTEM_PROMPT = """
 You are an expert query router for a Power Sector Regulatory Assistant.
 
 Your task is to determine whether a user's question requires searching
-the regulatory document database.
+ the regulatory document database.
 
 Return ONLY one datasource: 'chat' or 'retrieval'.
 """

@@ -18,7 +18,14 @@ from typing import List, Dict, Any
 
 from langchain_core.runnables import Runnable
 from langchain_core.documents import Document
-from sentence_transformers import CrossEncoder
+
+try:
+    from sentence_transformers import CrossEncoder
+except Exception as exc:  # pragma: no cover - optional dependency at runtime
+    CrossEncoder = None
+    _CROSS_ENCODER_IMPORT_ERROR = exc
+else:
+    _CROSS_ENCODER_IMPORT_ERROR = None
 
 from src.config import CFG
 from src.utils.logger import pipeline_logger as logger, pipeline_event
@@ -45,6 +52,10 @@ class CrossEncoderReranker(Runnable):
 
     def __init__(self, top_k: int = None):
         self.top_k = top_k or CFG["retrieval"]["stage2_k"]
+        if CrossEncoder is None:
+            raise ImportError(
+                "sentence-transformers could not be imported; cross-encoder reranking is unavailable."
+            ) from _CROSS_ENCODER_IMPORT_ERROR
         self.model = CrossEncoder(CFG["reranker"]["model"])
 
     def invoke(

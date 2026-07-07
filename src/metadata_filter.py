@@ -25,7 +25,8 @@ Usage:
 import json
 import re
 from typing import Optional
-from pydantic import BaseModel
+
+from pydantic import BaseModel, ConfigDict
 
 
 # ============================================================
@@ -50,13 +51,15 @@ def clear_filter_cache():
 # ============================================================
 
 class QueryFilters(BaseModel):
-    semantic_query:  str
-    document_type:   Optional[str] = None
-    discom:          Optional[str] = None
-    filing_year:     Optional[str] = None
-    commission:      Optional[str] = None
-    section_num:     Optional[str] = None
-    main_section:    Optional[str] = None
+    model_config = ConfigDict(extra="ignore")
+
+    semantic_query: Optional[str] = None
+    document_type: Optional[str] = None
+    discom: Optional[str] = None
+    filing_year: Optional[str] = None
+    commission: Optional[str] = None
+    section_num: Optional[str] = None
+    main_section: Optional[str] = None
     section_heading: Optional[str] = None
 
 
@@ -169,10 +172,36 @@ Output:"""
 # ============================================================
 
 def parse_json_response(text: str) -> dict:
+    if not text:
+        raise ValueError("Empty LLM response")
+
+    if isinstance(text, dict):
+        return text
+
+    if isinstance(text, (list, tuple)):
+        raise ValueError("LLM returned an unexpected non-object payload")
+
+    text = str(text).strip()
+    if not text:
+        raise ValueError("Empty LLM response")
+
+    if text.startswith("{") and text.endswith("}"):
+        return json.loads(text)
+
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if not match:
         raise ValueError(f"No JSON found in LLM response:\n{text}")
     return json.loads(match.group())
+
+
+def normalize_filter_payload(payload: dict) -> dict:
+    """Coerce empty/partial LLM output into a valid QueryFilters payload."""
+    if not isinstance(payload, dict):
+        raise ValueError("LLM returned a non-dict filter payload")
+
+    normalized = dict(payload)
+    normalized.setdefault("semantic_query", None)
+    return normalized
 
 
 # ============================================================
@@ -244,13 +273,20 @@ def get_query_filters(user_query: str, llm, collection) -> dict:
         return _filter_cache[user_query]
 
     # Build catalog, extract filters, validate
-    catalog  = build_dynamic_catalog(collection)
-    prompt   = build_filter_prompt(user_query, catalog)
+    catalog = build_dynamic_catalog(collection)
+    prompt = build_filter_prompt(user_query, catalog)
     response = llm.invoke(prompt)
 
     try:
-        parsed = QueryFilters(**parse_json_response(response.content))
+        raw_response = getattr(response, "content", response)
+        parsed_payload = normalize_filter_payload(parse_json_response(raw_response))
+        if isinstance(parsed_payload, dict) and parsed_payload.get("error"):
+            raise ValueError(parsed_payload["error"])
+
+        parsed = QueryFilters(**parsed_payload)
         result = build_mongo_filter(parsed)
+        if not result and not parsed.semantic_query:
+            result = {}
     except Exception as e:
         print(f"⚠️  Filter extraction failed ({e}) — using no filter")
         result = {}
