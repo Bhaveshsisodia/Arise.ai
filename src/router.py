@@ -26,6 +26,14 @@ You are an expert query router for a Power Sector Regulatory Assistant.
 Your task is to determine whether a user's question requires searching
  the regulatory document database.
 
+Choose 'chat' for:
+- greetings, thanks, farewells, general conversation
+- questions about the current conversation or prior messages
+- questions about the user's name, preferences, or details already stated in chat
+- prompts like "what did I say", "what is my name", "remember this", "who am I"
+
+Choose 'retrieval' only when the answer should come from regulatory documents.
+
 Return ONLY one datasource: 'chat' or 'retrieval'.
 """
 
@@ -48,14 +56,48 @@ class QueryRouter:
             # Fallback to raw llm if structured output not supported
             self.structured_llm = None
 
+    def _tokenize(self, text: str) -> set[str]:
+        import re
+        return set(re.findall(r"[a-z0-9]+", (text or "").lower()))
+
+    def _heuristic_route(self, question: str) -> str:
+        q = question.strip().lower()
+        tokens = self._tokenize(question)
+
+        greeting_patterns = (
+            "hi",
+            "hello",
+            "thanks",
+            "thank",
+            "bye",
+            "who are you",
+            "what can you do",
+        )
+        if any(pattern in q for pattern in greeting_patterns):
+            return "chat"
+
+        memory_terms = {
+            "remember", "recall", "earlier", "before", "previous", "prior",
+            "history", "conversation", "message", "messages", "question",
+            "questions", "asked", "said", "tell", "told", "name",
+        }
+        self_reference_terms = {"i", "me", "my", "mine"}
+        if (tokens & memory_terms) and (tokens & self_reference_terms):
+            return "chat"
+
+        if "my name is" in q or "who am i" in q:
+            return "chat"
+
+        return "retrieval"
+
     def route(self, question: str) -> str:
         """Return 'chat' or 'retrieval'. Falls back to 'retrieval' on error."""
+        heuristic = self._heuristic_route(question)
+        if heuristic == "chat":
+            return "chat"
+
         if self.structured_llm is None:
-            # Best-effort simple heuristic fallback
-            q = question.strip().lower()
-            if any(w in q for w in ("hi", "hello", "thanks", "thank", "bye", "who are you", "what can you do")):
-                return "chat"
-            return "retrieval"
+            return heuristic
 
         try:
             out = PROMPT | self.structured_llm

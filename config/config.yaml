@@ -56,4 +56,4 @@ redis:
   ttl: 1800
   prefix: "arise"
   semantic_enabled: true
-  semantic_similarity_threshold: 0.92
+  semantic_similarity_threshold: 0.80

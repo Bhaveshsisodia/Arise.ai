@@ -152,6 +152,22 @@ body::before {
     font-size: 0.98rem;
 }
 
+.stream-cursor {
+    display: inline-block;
+    width: 0.65ch;
+    height: 1.1em;
+    margin-left: 2px;
+    vertical-align: text-bottom;
+    background: rgba(173, 195, 255, 0.95);
+    border-radius: 2px;
+    animation: streamBlink 0.9s steps(1, end) infinite;
+}
+
+@keyframes streamBlink {
+    0%, 45% { opacity: 1; }
+    46%, 100% { opacity: 0; }
+}
+
 .typing-indicator {
     margin-top: 12px;
     font-size: 0.95rem;

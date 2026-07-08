@@ -98,6 +98,9 @@ Do not add unrelated details, reasoning steps, or metadata.
 If the answer is not contained in the context, say exactly:
 "Information not available in retrieved documents."
 
+Conversation History:
+{history}
+
 Context:
 {context}
 

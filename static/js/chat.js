@@ -1,6 +1,22 @@
 const messages = document.getElementById('messages');
 const input = document.getElementById('question');
 const button = document.getElementById('send');
+const STREAM_RENDER_INTERVAL_MS = 28;
+const STREAM_RENDER_CHARS_PER_TICK = 24;
+const conversationHistory = [];
+const SESSION_STORAGE_KEY = 'arise_chat_session_id';
+
+function getSessionId() {
+    const existing = window.sessionStorage.getItem(SESSION_STORAGE_KEY);
+    if (existing) {
+        return existing;
+    }
+    const created = (window.crypto && window.crypto.randomUUID)
+        ? window.crypto.randomUUID()
+        : `session-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    window.sessionStorage.setItem(SESSION_STORAGE_KEY, created);
+    return created;
+}
 
 function escapeHtml(text) {
     return text
@@ -122,6 +138,81 @@ function addMessage(role, text) {
     messages.scrollTop = messages.scrollHeight;
 }
 
+function createStreamRenderer(content) {
+    const state = {
+        renderedText: '',
+        pendingText: '',
+        intervalId: null,
+        flushAllAtEnd: false,
+    };
+    const cursor = document.createElement('span');
+    cursor.className = 'stream-cursor';
+
+    const paint = () => {
+        content.innerHTML = renderMarkdown(state.renderedText);
+        if (!state.flushAllAtEnd) {
+            content.appendChild(cursor);
+        }
+        messages.scrollTop = messages.scrollHeight;
+    };
+
+    const render = () => {
+        if (!state.pendingText) {
+            if (state.flushAllAtEnd && state.intervalId !== null) {
+                clearInterval(state.intervalId);
+                state.intervalId = null;
+            }
+            return;
+        }
+
+        const chunkSize = state.flushAllAtEnd
+            ? state.pendingText.length
+            : Math.min(STREAM_RENDER_CHARS_PER_TICK, state.pendingText.length);
+
+        state.renderedText += state.pendingText.slice(0, chunkSize);
+        state.pendingText = state.pendingText.slice(chunkSize);
+        paint();
+
+        if (!state.pendingText && state.flushAllAtEnd && state.intervalId !== null) {
+            clearInterval(state.intervalId);
+            state.intervalId = null;
+        }
+    };
+
+    const ensureRunning = () => {
+        if (state.intervalId !== null) {
+            return;
+        }
+        state.intervalId = window.setInterval(render, STREAM_RENDER_INTERVAL_MS);
+    };
+
+    return {
+        push(text) {
+            if (!text) {
+                return;
+            }
+            state.pendingText += text;
+            ensureRunning();
+        },
+        finish() {
+            state.flushAllAtEnd = true;
+            if (state.pendingText) {
+                ensureRunning();
+                render();
+            } else {
+                paint();
+            }
+            if (state.intervalId !== null) {
+                clearInterval(state.intervalId);
+                state.intervalId = null;
+            }
+        },
+        getText() {
+            return state.renderedText + state.pendingText;
+        },
+    };
+}
+
 function addSources(sources) {
     const container = document.createElement('div');
     container.className = 'sources';
@@ -146,7 +237,9 @@ function addSources(sources) {
 async function sendQuestion() {
     const question = input.value.trim();
     if (!question) return;
+    const sessionId = getSessionId();
     addMessage('user', question);
+    conversationHistory.push({ role: 'user', content: question });
     input.value = '';
     button.disabled = true;
 
@@ -173,7 +266,7 @@ async function sendQuestion() {
         const response = await fetch('/ask/stream', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ question }),
+            body: JSON.stringify({ question, session_id: sessionId }),
         });
 
         if (!response.ok) {
@@ -187,7 +280,7 @@ async function sendQuestion() {
         const decoder = new TextDecoder();
         let done = false;
         let buffer = '';
-        botMessage.textBuffer = '';
+        const streamRenderer = createStreamRenderer(content);
 
         while (!done) {
             const { value, done: doneReading } = await reader.read();
@@ -202,16 +295,15 @@ async function sendQuestion() {
                     try {
                         const event = JSON.parse(line);
                         if (event.type === 'delta') {
-                            botMessage.textBuffer += event.text;
-                            content.innerHTML = renderMarkdown(botMessage.textBuffer);
-                            messages.scrollTop = messages.scrollHeight;
+                            streamRenderer.push(event.text);
                         } else if (event.type === 'sources') {
+                            streamRenderer.finish();
                             if (Array.isArray(event.sources) && event.sources.length > 0) {
                                 addSourcesToMessage(botMessage, event.sources);
                             }
                         } else if (event.type === 'error') {
-                            botMessage.textBuffer += `\n[ERROR] ${event.error}`;
-                            content.innerHTML = renderMarkdown(botMessage.textBuffer);
+                            streamRenderer.push(`\n[ERROR] ${event.error}`);
+                            streamRenderer.finish();
                             botMessage.className = 'message error';
                         }
                     } catch (err) {
@@ -219,6 +311,11 @@ async function sendQuestion() {
                     }
                 }
             }
+        }
+        streamRenderer.finish();
+        const finalAnswer = streamRenderer.getText().trim();
+        if (finalAnswer) {
+            conversationHistory.push({ role: 'assistant', content: finalAnswer });
         }
     } catch (err) {
         content.textContent = `Error: ${err.message}`;
