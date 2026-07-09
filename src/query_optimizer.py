@@ -1,4 +1,8 @@
 
+from src.exception.custom_exception import QueryRewriteError
+from src.exception.error_utils import raise_with_context
+
+
 def hyde_rewrite(query, llm):
     """
     Step 1: Generate a hypothetical answer.
@@ -14,8 +18,16 @@ Do NOT say "I don't know."
 Question: {query}
 Answer:"""
 
-    response = llm.invoke(prompt)
-    return response.content.strip()
+    try:
+        response = llm.invoke(prompt)
+        return response.content.strip()
+    except Exception as exc:
+        raise_with_context(
+            QueryRewriteError,
+            exc,
+            "Failed to generate HyDE rewrite",
+            context={"strategy": "hyde", "query": query},
+        )
 
 
 
@@ -31,12 +43,20 @@ Original: {query}
 
 Output one query per line, no numbering:"""
 
-    response = llm.invoke(prompt)
-    variants = [
-        line.strip()
-        for line in response.content.strip().split("\n")
-        if line.strip()
-    ][:num_variants]
+    try:
+        response = llm.invoke(prompt)
+        variants = [
+            line.strip()
+            for line in response.content.strip().split("\n")
+            if line.strip()
+        ][:num_variants]
+    except Exception as exc:
+        raise_with_context(
+            QueryRewriteError,
+            exc,
+            "Failed to generate multi-query rewrite",
+            context={"strategy": "multi", "query": query, "num_variants": num_variants},
+        )
 
     all_queries = [query] + variants
 
@@ -59,8 +79,16 @@ Now do this for:
   Specific: {query}
   Abstract:"""
 
-    response = llm.invoke(prompt)
-    return response.content.strip()
+    try:
+        response = llm.invoke(prompt)
+        return response.content.strip()
+    except Exception as exc:
+        raise_with_context(
+            QueryRewriteError,
+            exc,
+            "Failed to generate step-back rewrite",
+            context={"strategy": "stepback", "query": query},
+        )
 
 
 

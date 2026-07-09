@@ -28,7 +28,9 @@ else:
     _CROSS_ENCODER_IMPORT_ERROR = None
 
 from src.config import CFG
-from src.utils.logger import pipeline_logger as logger, pipeline_event
+from src.exception.custom_exception import RerankerError
+from src.exception.error_utils import raise_with_context
+from src.utils.logger import pipeline_event
 
 
 # ============================================================
@@ -53,10 +55,19 @@ class CrossEncoderReranker(Runnable):
     def __init__(self, top_k: int = None):
         self.top_k = top_k or CFG["retrieval"]["stage2_k"]
         if CrossEncoder is None:
-            raise ImportError(
-                "sentence-transformers could not be imported; cross-encoder reranking is unavailable."
+            raise RerankerError(
+                "sentence-transformers could not be imported; cross-encoder reranking is unavailable.",
+                context={"model_name": CFG["reranker"]["model"]},
             ) from _CROSS_ENCODER_IMPORT_ERROR
-        self.model = CrossEncoder(CFG["reranker"]["model"])
+        try:
+            self.model = CrossEncoder(CFG["reranker"]["model"])
+        except Exception as exc:
+            raise_with_context(
+                RerankerError,
+                exc,
+                "Failed to initialize cross-encoder reranker",
+                context={"model_name": CFG["reranker"]["model"]},
+            )
 
     def invoke(
         self,
@@ -75,7 +86,15 @@ class CrossEncoderReranker(Runnable):
 
         # Build (query, text) pairs — cross-encoder needs both together
         pairs  = [(query, doc.page_content) for doc in documents]
-        scores = self.model.predict(pairs)
+        try:
+            scores = self.model.predict(pairs)
+        except Exception as exc:
+            raise_with_context(
+                RerankerError,
+                exc,
+                "Cross-encoder reranking failed",
+                context={"document_count": len(documents)},
+            )
 
         # Attach score to document metadata for inspection
         for doc, score in zip(documents, scores):

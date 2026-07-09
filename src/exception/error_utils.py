@@ -1,16 +1,8 @@
-"""Error utility helpers: produce detailed error reports and helpers to raise
-custom exceptions preserving context and traceback.
-
-Provides:
-- get_detailed_error(error) -> dict
-- format_detailed_error(dict) -> str
-- raise_with_context(exc_type, original_exc, message, logger=None)
-"""
-import sys
+"""Helpers for logging and re-raising project exceptions with context."""
 import traceback
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
+from typing import Any, Dict, Optional, Type
 
 from .custom_exception import ProjectException
 
@@ -78,19 +70,26 @@ def format_detailed_error(info: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def raise_with_context(exc_type: type, original_exc: Exception, message: Optional[str] = None, logger: Optional[logging.Logger] = None) -> None:
+def raise_with_context(
+    exc_type: Type[ProjectException],
+    original_exc: Exception,
+    message: Optional[str] = None,
+    logger: Optional[logging.Logger] = None,
+    context: Optional[Dict[str, Any]] = None,
+) -> None:
     """Log the original exception with details and raise the new exception chaining the original.
 
     Example:
         raise_with_context(RetrievalError, e, "Hybrid retrieval failed")
     """
     info = get_detailed_error(original_exc)
+    if context:
+        info["context"] = context
     formatted = format_detailed_error(info)
     if logger is None:
         logger = logging.getLogger("arise.errors")
     logger.error("%s", formatted)
-    # raise new exception with chained original
-    raise exc_type(message or str(original_exc)) from original_exc
+    raise exc_type(message or str(original_exc), context=info) from original_exc
 
 
 __all__ = ["get_detailed_error", "format_detailed_error", "raise_with_context"]

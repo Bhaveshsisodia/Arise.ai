@@ -12,14 +12,31 @@ import os
 from pymongo import MongoClient
 from dotenv import load_dotenv
 from src.config import CFG
+from src.exception.custom_exception import DatabaseError
+from src.exception.error_utils import raise_with_context
 
 load_dotenv()
 
 _MONGO_URI = os.environ.get("MONGO_URI")
 if not _MONGO_URI:
-    raise EnvironmentError("MONGO_URI not found in environment / .env file")
+    raise DatabaseError(
+        "MONGO_URI not found in environment / .env file",
+        context={"env_var": "MONGO_URI"},
+    )
 
-_client = MongoClient(_MONGO_URI)
-_db     = _client[CFG["mongodb"]["database"]]
-
-collection = _db[CFG["mongodb"]["collection"]]
+try:
+    _client = MongoClient(_MONGO_URI)
+    _db = _client[CFG["mongodb"]["database"]]
+    collection = _db[CFG["mongodb"]["collection"]]
+except DatabaseError:
+    raise
+except Exception as exc:
+    raise_with_context(
+        DatabaseError,
+        exc,
+        "Failed to initialize MongoDB collection",
+        context={
+            "database": CFG["mongodb"]["database"],
+            "collection": CFG["mongodb"]["collection"],
+        },
+    )

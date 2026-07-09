@@ -14,10 +14,6 @@ from langchain_core.documents import Document
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_classic.retrievers import ContextualCompressionRetriever
-from langchain_classic.retrievers.document_compressors.chain_extract import (
-    LLMChainExtractor,
-)
 from langsmith import traceable
 
 try:
@@ -29,6 +25,14 @@ else:
     _SENTENCE_TRANSFORMERS_IMPORT_ERROR = None
 
 from src.config import CFG
+from src.exception.custom_exception import (
+    EmbeddingError,
+    LLMGenerationError,
+    ProjectException,
+    RetrievalError,
+    ValidationError,
+)
+from src.exception.error_utils import raise_with_context
 from src.generator import build_context, get_llm, output_parser
 from src.router import QueryRouter
 from src.reranker import CrossEncoderReranker, LLMListwiseReranker
@@ -302,6 +306,12 @@ def _prepare_response_payload(
     session_id: str | None = None,
     use_llm_reranker: bool = False,
 ) -> Dict[str, Any]:
+    if not (question or "").strip():
+        raise ValidationError(
+            "Question cannot be empty",
+            context={"field": "question"},
+        )
+
     components = build_chain_components(use_llm_reranker)
     normalized_history = _get_effective_history(history, session_id)
     router = QueryRouter(llm=components["llm"])
@@ -311,16 +321,26 @@ def _prepare_response_payload(
     if datasource == "chat":
         documents: List[Document] = []
     else:
-        documents = components["retrieval_engine"].invoke(retrieval_question)
-        if components["ce_reranker"] is not None:
-            documents = _apply_ce_reranker(
-                {"question": retrieval_question, "documents": documents},
-                components["ce_reranker"],
-            )
-        if use_llm_reranker and components["llm_reranker"] is not None:
-            documents = _apply_llm_reranker(
-                {"question": retrieval_question, "documents": documents},
-                components["llm_reranker"],
+        try:
+            documents = components["retrieval_engine"].invoke(retrieval_question)
+            if components["ce_reranker"] is not None:
+                documents = _apply_ce_reranker(
+                    {"question": retrieval_question, "documents": documents},
+                    components["ce_reranker"],
+                )
+            if use_llm_reranker and components["llm_reranker"] is not None:
+                documents = _apply_llm_reranker(
+                    {"question": retrieval_question, "documents": documents},
+                    components["llm_reranker"],
+                )
+        except ProjectException:
+            raise
+        except Exception as exc:
+            raise_with_context(
+                RetrievalError,
+                exc,
+                "Failed to prepare retrieval response payload",
+                context={"question": question, "retrieval_question": retrieval_question},
             )
 
     return {
@@ -366,7 +386,20 @@ def _build_sources(documents: List[Document], max_sources: int) -> List[Dict[str
 def _get_embedder() -> SentenceTransformer:
     model_name = CFG["embedding"]["model"]
     logger.info("Loading embedding model: %s", model_name)
-    return SentenceTransformer(model_name)
+    if SentenceTransformer is None:
+        raise EmbeddingError(
+            "sentence-transformers could not be imported; embedding model is unavailable.",
+            context={"model_name": model_name},
+        )
+    try:
+        return SentenceTransformer(model_name)
+    except Exception as exc:
+        raise_with_context(
+            EmbeddingError,
+            exc,
+            "Failed to load embedding model",
+            context={"model_name": model_name},
+        )
 
 
 @lru_cache(maxsize=4)
@@ -379,15 +412,24 @@ def build_chain_components(use_llm_reranker: bool = False) -> Dict[str, Any]:
     use_llm_cfg = CFG.get("reranker", {}).get("use_llm", False)
     context_compression = CFG["retrieval"].get("context_compression", False)
 
-    embedder = _get_embedder()
-    llm = get_llm()
+    try:
+        embedder = _get_embedder()
+        llm = get_llm()
 
-    retriever = MongoHybridRetriever(
-        embedder=embedder,
-        llm=llm,
-        collection=collection,
-        use_mmr=use_mmr_cfg,
-    )
+        retriever = MongoHybridRetriever(
+            embedder=embedder,
+            llm=llm,
+            collection=collection,
+            use_mmr=use_mmr_cfg,
+        )
+    except ProjectException:
+        raise
+    except Exception as exc:
+        raise_with_context(
+            RetrievalError,
+            exc,
+            "Failed to build chain components",
+        )
 
     retrieval_engine = retriever
 
@@ -465,7 +507,10 @@ Question:
             return resp
         except Exception as e:
             logger.exception("LLM generation failed: %s", e)
-            raise
+            raise LLMGenerationError(
+                "Failed to generate answer from language model",
+                context={"datasource": datasource, "question": question},
+            ) from e
 
     generation_chain = (
         RunnableLambda(_generate_using_llm)
@@ -560,6 +605,9 @@ def ask_with_sources(
     use_llm_reranker: bool = False,
     max_sources: int = 5,
 ) -> Dict[str, Any]:
+    if not (question or "").strip():
+        raise ValidationError("Question cannot be empty", context={"field": "question"})
+
     cache = get_redis_cache()
     normalized_question = (question or "").strip()
     normalized_history = _get_effective_history(history, session_id)
@@ -585,7 +633,15 @@ def ask_with_sources(
         return cached_answer
 
     embedder = _get_embedder()
-    question_embedding = embedder.encode(normalized_question, normalize_embeddings=True).tolist()
+    try:
+        question_embedding = embedder.encode(normalized_question, normalize_embeddings=True).tolist()
+    except Exception as exc:
+        raise_with_context(
+            EmbeddingError,
+            exc,
+            "Failed to encode question for answer caching",
+            context={"question": normalized_question},
+        )
     if _SEMANTIC_CACHE_ENABLED:
         cached_answer = cache.get_semantic_json(
             "answer_semantic",
@@ -683,9 +739,14 @@ def ask(question: str, chain=None) -> str:
 
     try:
         answer = chain.invoke({"question": question})
+    except ProjectException:
+        raise
     except Exception as exc:
         logger.exception("Chain invocation failed: %s", exc)
-        return f"Chain error: {type(exc).__name__}: {exc}"
+        raise LLMGenerationError(
+            "Chain invocation failed",
+            context={"question": question},
+        ) from exc
 
     if answer is None:
         logger.warning("Chain returned None for question: %s", question)
@@ -716,7 +777,15 @@ def _generate_answer_text(
     else:
         prompt = _build_rag_answer_prompt(question, history, context)
 
-    response = llm.invoke(prompt)
+    try:
+        response = llm.invoke(prompt)
+    except Exception as exc:
+        raise_with_context(
+            LLMGenerationError,
+            exc,
+            "Failed to generate final answer",
+            context={"datasource": datasource, "question": question},
+        )
     return output_parser.invoke(response)
 
 
@@ -746,10 +815,18 @@ def _stream_answer_text(
     else:
         prompt = _build_rag_answer_prompt(question, history, context)
 
-    for chunk in llm.stream(prompt):
-        text = getattr(chunk, "content", chunk)
-        if text is None:
-            continue
-        normalized = _normalize_output(text)
-        if normalized:
-            yield normalized
+    try:
+        for chunk in llm.stream(prompt):
+            text = getattr(chunk, "content", chunk)
+            if text is None:
+                continue
+            normalized = _normalize_output(text)
+            if normalized:
+                yield normalized
+    except Exception as exc:
+        raise_with_context(
+            LLMGenerationError,
+            exc,
+            "Failed to stream final answer",
+            context={"datasource": datasource, "question": question},
+        )

@@ -1,54 +1,29 @@
 """
-metadata_filter.py — LLM-based metadata filter extraction.
+metadata_filter.py - LLM-based metadata filter extraction.
 
 Converts a natural language query into a MongoDB $vectorSearch filter dict.
-
-Key facts about your Atlas vector index:
-  Fields declared as "type: filter" in your index:
-    ✅ metadata.discom
-    ✅ metadata.filing_year
-    ✅ metadata.section_heading
-    ✅ metadata.section_num
-    ✅ metadata.main_section
-    ✅ metadata.document_type
-    ✅ metadata.commission
-    ❌ metadata.cost_head  ← NOT in index, removed from filtering
-
-  $vectorSearch only filters on fields declared in the index.
-  Filtering on an undeclared field = 0 results silently.
-
-Usage:
-    from src.metadata_filter import get_query_filters
-    mongo_filter = get_query_filters(query, llm, collection)
 """
 
 import json
+import logging
 import re
 from typing import Optional
 
 from pydantic import BaseModel, ConfigDict
 
+from src.exception.custom_exception import DatabaseError, ValidationError
+from src.exception.error_utils import raise_with_context
 
-# ============================================================
-# FILTER CACHE
-# get_query_filters() makes one LLM call per query.
-# In combined_retrieve(), 4 sub-retrievers call it for the
-# same query → 4 identical LLM calls wasted.
-# Cache by query string → call LLM only once per unique query.
-# ============================================================
+
+logger = logging.getLogger("arise.metadata_filter")
 
 _filter_cache: dict = {}
+
 
 def clear_filter_cache():
     """Call between sessions to reset cache."""
     _filter_cache.clear()
 
-
-# ============================================================
-# PYDANTIC MODEL
-# ONLY fields that exist in your Atlas vector index.
-# cost_head removed — not in index, causes silent 0 results.
-# ============================================================
 
 class QueryFilters(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -63,15 +38,6 @@ class QueryFilters(BaseModel):
     section_heading: Optional[str] = None
 
 
-# ============================================================
-# DYNAMIC CATALOG
-# Reads distinct values live from MongoDB.
-# Only includes fields that:
-#   1. Are declared in your Atlas vector index (can be filtered)
-#   2. Have more than 1 distinct value (otherwise filter is useless)
-# ============================================================
-
-# Fields that exist in your Atlas vector index as "type: filter"
 _INDEXED_FILTER_FIELDS = [
     "document_type",
     "discom",
@@ -82,23 +48,27 @@ _INDEXED_FILTER_FIELDS = [
     "commission",
 ]
 
+
 def build_dynamic_catalog(collection) -> dict:
     """
-    Builds a catalog of filterable metadata values from MongoDB.
+    Build a catalog of filterable metadata values from MongoDB.
+
     Only queries fields that are actually indexed for filtering.
     """
     catalog = {}
-    for field in _INDEXED_FILTER_FIELDS:
-        values = collection.distinct(f"metadata.{field}")
-        # Skip fields with 0 or 1 value — filtering on them narrows nothing
-        if len(values) > 1:
-            catalog[field] = sorted(values)  # sorted for consistent prompt
-    return catalog
+    try:
+        for field in _INDEXED_FILTER_FIELDS:
+            values = collection.distinct(f"metadata.{field}")
+            if len(values) > 1:
+                catalog[field] = sorted(values)
+        return catalog
+    except Exception as exc:
+        raise_with_context(
+            DatabaseError,
+            exc,
+            "Failed to build metadata catalog from MongoDB",
+        )
 
-
-# ============================================================
-# PROMPT
-# ============================================================
 
 def build_filter_prompt(user_query: str, metadata_catalog: dict) -> str:
     return f"""
@@ -115,7 +85,7 @@ Your task:
 3. Never guess metadata not present in the query.
 4. If metadata is not present, do not include it.
 5. Rewrite the question into a concise semantic search query.
-6. Return ONLY valid JSON — no markdown, no explanation.
+6. Return ONLY valid JSON - no markdown, no explanation.
 
 Field meanings:
 
@@ -167,56 +137,41 @@ Query: {user_query}
 Output:"""
 
 
-# ============================================================
-# JSON PARSER
-# ============================================================
-
 def parse_json_response(text: str) -> dict:
     if not text:
-        raise ValueError("Empty LLM response")
+        raise ValidationError("Empty LLM response while extracting metadata filters")
 
     if isinstance(text, dict):
         return text
 
     if isinstance(text, (list, tuple)):
-        raise ValueError("LLM returned an unexpected non-object payload")
+        raise ValidationError("LLM returned an unexpected non-object metadata payload")
 
     text = str(text).strip()
     if not text:
-        raise ValueError("Empty LLM response")
+        raise ValidationError("Empty LLM response while extracting metadata filters")
 
     if text.startswith("{") and text.endswith("}"):
         return json.loads(text)
 
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if not match:
-        raise ValueError(f"No JSON found in LLM response:\n{text}")
+        raise ValidationError("No JSON found in LLM metadata filter response")
     return json.loads(match.group())
 
 
 def normalize_filter_payload(payload: dict) -> dict:
-    """Coerce empty/partial LLM output into a valid QueryFilters payload."""
+    """Coerce empty or partial LLM output into a valid QueryFilters payload."""
     if not isinstance(payload, dict):
-        raise ValueError("LLM returned a non-dict filter payload")
+        raise ValidationError("LLM returned a non-dict metadata filter payload")
 
     normalized = dict(payload)
     normalized.setdefault("semantic_query", None)
     return normalized
 
 
-# ============================================================
-# MONGO FILTER BUILDER
-# Converts Pydantic model → MongoDB filter dict.
-# Only includes fields that are non-None.
-# ============================================================
-
 def build_mongo_filter(parsed: QueryFilters) -> dict:
-    """
-    Converts parsed QueryFilters → MongoDB filter dict.
-
-    All fields here are guaranteed to exist in your Atlas
-    vector index as 'type: filter' — safe to use in $vectorSearch.
-    """
+    """Convert parsed QueryFilters into a MongoDB filter dict."""
     mongo_filter = {}
 
     if parsed.document_type:
@@ -243,54 +198,32 @@ def build_mongo_filter(parsed: QueryFilters) -> dict:
     return mongo_filter
 
 
-# ============================================================
-# PUBLIC FUNCTION
-# ============================================================
-
 def get_query_filters(user_query: str, llm, collection) -> dict:
     """
-    Extracts MongoDB filter dict from a natural language query.
+    Extract a MongoDB filter dict from a natural language query.
 
-    Pipeline:
-      1. Check cache — return immediately if query seen before
-      2. Build dynamic catalog from MongoDB (indexed fields only)
-      3. Ask LLM to extract structured filters
-      4. Validate with Pydantic
-      5. Convert to MongoDB filter dict
-      6. Cache result for future calls
-
-    Args:
-        user_query: natural language question
-        llm:        LangChain LLM instance
-        collection: pymongo Collection
-
-    Returns:
-        dict — MongoDB filter ready for $vectorSearch or find()
-        Empty dict {} means no filter — full collection search.
+    Empty dict means no metadata filter should be applied.
     """
-    # Check cache first
     if user_query in _filter_cache:
         return _filter_cache[user_query]
 
-    # Build catalog, extract filters, validate
     catalog = build_dynamic_catalog(collection)
     prompt = build_filter_prompt(user_query, catalog)
-    response = llm.invoke(prompt)
 
     try:
+        response = llm.invoke(prompt)
         raw_response = getattr(response, "content", response)
         parsed_payload = normalize_filter_payload(parse_json_response(raw_response))
         if isinstance(parsed_payload, dict) and parsed_payload.get("error"):
-            raise ValueError(parsed_payload["error"])
+            raise ValidationError(str(parsed_payload["error"]))
 
         parsed = QueryFilters(**parsed_payload)
         result = build_mongo_filter(parsed)
         if not result and not parsed.semantic_query:
             result = {}
-    except Exception as e:
-        print(f"⚠️  Filter extraction failed ({e}) — using no filter")
+    except Exception as exc:
+        logger.warning("Filter extraction failed; using no filter: %s", exc)
         result = {}
 
-    # Cache and return
     _filter_cache[user_query] = result
     return result

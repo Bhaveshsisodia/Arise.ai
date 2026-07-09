@@ -33,6 +33,14 @@ else:
     _SENTENCE_TRANSFORMERS_UTIL_IMPORT_ERROR = None
 
 from src.config import CFG
+from src.exception.custom_exception import (
+    DatabaseError,
+    EmbeddingError,
+    QueryRewriteError,
+    RetrievalError,
+    ValidationError,
+)
+from src.exception.error_utils import raise_with_context
 from src.utils.logger import pipeline_logger as logger, pipeline_event
 from src.metadata_filter import get_query_filters
 from src.query_optimizer import hyde_rewrite, multi_query_rewrite, stepback_rewrite
@@ -54,9 +62,17 @@ def _get_embedding(text: str, embedder) -> list:
     """
     cache_key = (text, id(embedder))
     if cache_key not in _embedding_cache:
-        _embedding_cache[cache_key] = embedder.encode(
-            text, normalize_embeddings=True
-        ).tolist()
+        try:
+            _embedding_cache[cache_key] = embedder.encode(
+                text, normalize_embeddings=True
+            ).tolist()
+        except Exception as exc:
+            raise_with_context(
+                EmbeddingError,
+                exc,
+                "Failed to compute query embedding",
+                context={"text_preview": text[:120]},
+            )
     return _embedding_cache[cache_key]
 
 
@@ -114,12 +130,28 @@ def _vector_search(
         "vec_score": {"$meta": "vectorSearchScore"}
     }}
 
-    results = list(collection.aggregate([{"$vectorSearch": vector_config}, project]))
+    try:
+        results = list(collection.aggregate([{"$vectorSearch": vector_config}, project]))
+    except Exception as exc:
+        raise_with_context(
+            DatabaseError,
+            exc,
+            "MongoDB vector search failed",
+            context={"limit": limit, "num_candidates": vec_candidates},
+        )
 
     # Fallback: retry without filter if nothing returned
     if not results and mongo_filter:
         no_filter = {k: v for k, v in vector_config.items() if k != "filter"}
-        results = list(collection.aggregate([{"$vectorSearch": no_filter}, project]))
+        try:
+            results = list(collection.aggregate([{"$vectorSearch": no_filter}, project]))
+        except Exception as exc:
+            raise_with_context(
+                DatabaseError,
+                exc,
+                "MongoDB vector search fallback failed",
+                context={"limit": limit, "num_candidates": vec_candidates},
+            )
 
     return results
 
@@ -224,17 +256,25 @@ def hybrid_retrieve(
         if mongo_filter:
             text_query.update(mongo_filter)
 
-        text_results = list(
-            collection.find(
-                text_query,
-                {"text": 1, "metadata": 1, "embedding": 1, "text_score": {"$meta": "textScore"}}
+        try:
+            text_results = list(
+                collection.find(
+                    text_query,
+                    {"text": 1, "metadata": 1, "embedding": 1, "text_score": {"$meta": "textScore"}}
+                )
+                .sort([("text_score", {"$meta": "textScore"})])
+                .limit(text_limit)
             )
-            .sort([("text_score", {"$meta": "textScore"})])
-            .limit(text_limit)
-        )
+        except Exception as exc:
+            raise_with_context(
+                DatabaseError,
+                exc,
+                "MongoDB text search failed",
+                context={"query": query, "text_limit": text_limit},
+            )
 
     if not (use_vector or use_text):
-        raise ValueError(
+        raise ValidationError(
             "Both vector and text search are disabled in config; enable at least one of 'use_vector' or 'use_text'."
         )
 
@@ -381,15 +421,16 @@ class MongoHybridRetriever(BaseRetriever):
             allow_stepback=cfg_query.get('allow_stepback', True),
         )
 
-        if strategy == "hyde" and cfg_query.get('allow_hyde', True):
-            query = hyde_rewrite(query, self.llm)
-        elif strategy == "multi" and cfg_query.get('allow_multi', True):
-            query = multi_query_rewrite(query, self.llm)
-        elif strategy == "stepback" and cfg_query.get('allow_stepback', True):
-            query = stepback_rewrite(query, self.llm)
-        else:
-            # no rewrite applied (strategy disabled or unknown)
-            query = query
+        try:
+            if strategy == "hyde" and cfg_query.get('allow_hyde', True):
+                query = hyde_rewrite(query, self.llm)
+            elif strategy == "multi" and cfg_query.get('allow_multi', True):
+                query = multi_query_rewrite(query, self.llm)
+            elif strategy == "stepback" and cfg_query.get('allow_stepback', True):
+                query = stepback_rewrite(query, self.llm)
+        except QueryRewriteError as exc:
+            logger.warning("Query rewrite failed; using original query: %s", exc)
+            query = original_query
 
         pipeline_event(
             "query_rewrite.attempt",
@@ -423,22 +464,42 @@ class MongoHybridRetriever(BaseRetriever):
                 return [_to_document(doc) for doc in cached_candidates]
 
         # Stage 1: Hybrid RRF
-        candidates = hybrid_retrieve(
-            query      = query,
-            embedder   = self.embedder,
-            llm        = self.llm,
-            collection = self.collection,
-            top_k      = cfg["stage1_k"],
-        )
+        try:
+            candidates = hybrid_retrieve(
+                query=query,
+                embedder=self.embedder,
+                llm=self.llm,
+                collection=self.collection,
+                top_k=cfg["stage1_k"],
+            )
+        except Exception as exc:
+            if isinstance(exc, (DatabaseError, EmbeddingError, RetrievalError, ValidationError)):
+                raise
+            raise_with_context(
+                RetrievalError,
+                exc,
+                "Hybrid retrieval failed",
+                context={"query": query},
+            )
 
         # Optional: MMR diversity
         if self.use_mmr and candidates:
-            candidates = mmr(
-                query    = query,
-                documents= candidates,
-                embedder = self.embedder,
-                top_k    = cfg["stage1_k"],
-            )
+            try:
+                candidates = mmr(
+                    query=query,
+                    documents=candidates,
+                    embedder=self.embedder,
+                    top_k=cfg["stage1_k"],
+                )
+            except Exception as exc:
+                if isinstance(exc, EmbeddingError):
+                    raise
+                raise_with_context(
+                    RetrievalError,
+                    exc,
+                    "MMR reranking failed",
+                    context={"query": query, "candidate_count": len(candidates)},
+                )
 
         if candidates:
             cache.set_json("retrieval", cache_key, candidates, ttl=1800)

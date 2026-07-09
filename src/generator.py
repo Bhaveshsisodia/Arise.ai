@@ -19,6 +19,8 @@ from langchain_groq import ChatGroq
 from dotenv import load_dotenv
 
 from src.config import CFG
+from src.exception.custom_exception import LLMError
+from src.exception.error_utils import raise_with_context
 
 load_dotenv()
 
@@ -35,13 +37,26 @@ def get_llm() -> ChatGroq:
     """
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
-        raise EnvironmentError("GROQ_API_KEY not found in environment / .env file")
+        raise LLMError(
+            "GROQ_API_KEY not found in environment / .env file",
+            context={"env_var": "GROQ_API_KEY"},
+        )
 
-    return ChatGroq(
-        api_key    = api_key,
-        model_name = CFG["llm"]["model"],
-        temperature= CFG["llm"]["temperature"],
-    )
+    try:
+        return ChatGroq(
+            api_key=api_key,
+            model_name=CFG["llm"]["model"],
+            temperature=CFG["llm"]["temperature"],
+        )
+    except LLMError:
+        raise
+    except Exception as exc:
+        raise_with_context(
+            LLMError,
+            exc,
+            "Failed to initialize LLM client",
+            context={"model_name": CFG["llm"]["model"]},
+        )
 
 
 # ============================================================

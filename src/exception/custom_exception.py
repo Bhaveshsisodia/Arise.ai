@@ -1,58 +1,85 @@
-"""Custom exception hierarchy for the project.
-
-Follow the project's error handling standards: specific exceptions, no bare excepts,
-and clear exception types for production-grade error handling.
-"""
-from typing import Optional
+"""Custom exception hierarchy for the project."""
+from typing import Any, Optional
 
 
 class ProjectException(Exception):
-    """Base exception for the project."""
-    def __init__(self, message: str, *, context: Optional[dict] = None) -> None:
+    """Base exception carrying an API-friendly status code and error code."""
+
+    error_code = "PROJECT_ERROR"
+    status_code = 500
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        context: Optional[dict[str, Any]] = None,
+        error_code: Optional[str] = None,
+        status_code: Optional[int] = None,
+    ) -> None:
         super().__init__(message)
         self.context = context or {}
+        self.error_code = error_code or self.error_code
+        self.status_code = status_code or self.status_code
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "code": self.error_code,
+            "message": str(self),
+            "context": self.context,
+        }
 
 
 class DataLoadingError(ProjectException):
-    pass
+    error_code = "DATA_LOADING_ERROR"
+    status_code = 500
 
 
 class RetrievalError(ProjectException):
-    pass
+    error_code = "RETRIEVAL_ERROR"
+    status_code = 500
 
 
 class EmbeddingError(ProjectException):
-    pass
+    error_code = "EMBEDDING_ERROR"
+    status_code = 500
 
 
 class LLMError(ProjectException):
-    pass
+    error_code = "LLM_ERROR"
+    status_code = 502
 
 
 class DatabaseError(ProjectException):
-    pass
+    error_code = "DATABASE_ERROR"
+    status_code = 503
 
 
 class APIError(ProjectException):
-    pass
+    error_code = "API_ERROR"
+    status_code = 500
 
 
 class ValidationError(ProjectException):
-    pass
+    error_code = "VALIDATION_ERROR"
+    status_code = 400
 
 
 # RAG / domain specific
 class VectorStoreError(ProjectException):
-    pass
+    error_code = "VECTOR_STORE_ERROR"
+    status_code = 503
 
 
 class RerankerError(ProjectException):
-    pass
+    error_code = "RERANKER_ERROR"
+    status_code = 500
 
 
 class QueryRewriteError(ProjectException):
-    pass
+    error_code = "QUERY_REWRITE_ERROR"
+    status_code = 500
 
 
 class LLMGenerationError(ProjectException):
-    pass
+    error_code = "LLM_GENERATION_ERROR"
+    status_code = 502
