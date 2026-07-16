@@ -1,50 +1,28 @@
-## for arise_env
-# pymupdf==1.24.0
-# pdfplumber==0.11.0
-# pytesseract==0.3.10
-# Pillow==10.3.0
-# sentence-transformers==2.7.0
-# faiss-cpu==1.8.0
-# langchain==0.2.0
-# langchain-community==0.2.0
-# python-dotenv==1.0.0
-# openai==1.30.0
-# numpy==1.26.4
-# sentence-transformers==2.7.0
-# langchain-groq==0.2.0
-# qdrant-client==1.9.0
+# Core web app
+fastapi
+gunicorn
+uvicorn
+jinja2
+pydantic
+python-dotenv
 
-# for arise **************************************************************
-# Core LLM Framework
+# Configuration and data access
+pyyaml
+pymongo
+redis
+numpy==1.26.4
 
+# LangChain stack used by the runtime app
 langchain
 langchain-community
-
-# Gemini
-langchain-google-genai
-
-# Groq
+langchain-core
 langchain-groq
+langsmith
 
-# LangGraph
-langgraph
-
-# Vector DB
-faiss-cpu
+# Retrieval and reranking models
 sentence-transformers
 
-# PDF
-pypdf
-pdfplumber
-pymupdf
-
-# Backend
-fastapi
-uvicorn
-
-# Utils
-python-dotenv
-redis
-pandas
-numpy==1.26.4
-qdrant-client==1.9.0
+# Optional evaluation providers used by src/evaluation_lang/
+langchain-google-genai
+langchain-openai
+typing-extensions

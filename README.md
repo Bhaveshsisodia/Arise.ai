@@ -175,6 +175,17 @@ Default local URLs:
 - API: `http://127.0.0.1:8000`
 - Chat UI: `http://127.0.0.1:8000/chat`
 - Health check: `http://127.0.0.1:8000/health`
+- Readiness check: `http://127.0.0.1:8000/ready`
+
+## Production Deployment
+
+Production deployment artifacts are included in the repo:
+
+- [Dockerfile](/D:/python scripts/Generative AI/arise_chatbot/Dockerfile)
+- [.env.example](/D:/python scripts/Generative AI/arise_chatbot/.env.example)
+- [azure-container-app.template.yaml](/D:/python scripts/Generative AI/arise_chatbot/azure-container-app.template.yaml)
+- [docs/production-deployment.md](/D:/python scripts/Generative AI/arise_chatbot/docs/production-deployment.md)
+- [.github/workflows/deploy-container-app.yml](/D:/python scripts/Generative AI/arise_chatbot/.github/workflows/deploy-container-app.yml)
 
 ## API Examples
 

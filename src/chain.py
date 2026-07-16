@@ -8,7 +8,7 @@ from functools import lru_cache
 from typing import Any, Dict, List
 
 from dotenv import load_dotenv
-from langchain_core.chat_history import InMemoryChatMessageHistory
+from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.documents import Document
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough
@@ -39,6 +39,7 @@ from src.reranker import CrossEncoderReranker, LLMListwiseReranker
 from src.retriever import MongoHybridRetriever
 from src.utils.logger import pipeline_logger as logger
 from src.utils.redis_cache import build_cache_key, get_redis_cache
+from src.utils.session_store import RedisBackedChatMessageHistory
 from src.vector_db import collection
 import re
 
@@ -47,7 +48,6 @@ load_dotenv()
 _SEMANTIC_CACHE_THRESHOLD = float(CFG.get("redis", {}).get("semantic_similarity_threshold", 0.92))
 _SEMANTIC_CACHE_ENABLED = bool(CFG.get("redis", {}).get("semantic_enabled", True))
 _MAX_HISTORY_TURNS = 8
-_SESSION_HISTORIES: Dict[str, InMemoryChatMessageHistory] = {}
 
 
 def setup_langsmith() -> None:
@@ -103,10 +103,8 @@ def _format_history(history: List[Dict[str, str]]) -> str:
     return "\n".join(lines)
 
 
-def _get_session_history(session_id: str) -> InMemoryChatMessageHistory:
-    if session_id not in _SESSION_HISTORIES:
-        _SESSION_HISTORIES[session_id] = InMemoryChatMessageHistory()
-    return _SESSION_HISTORIES[session_id]
+def _get_session_history(session_id: str) -> BaseChatMessageHistory:
+    return RedisBackedChatMessageHistory(session_id)
 
 
 def _append_session_turn(session_id: str | None, question: str, answer: str) -> None:

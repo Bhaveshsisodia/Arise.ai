@@ -1,0 +1,62 @@
+name: arise-chatbot
+type: Microsoft.App/containerApps
+location: <azure-region>
+properties:
+  managedEnvironmentId: /subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.App/managedEnvironments/<container-app-environment>
+  configuration:
+    ingress:
+      external: true
+      targetPort: 8000
+      transport: http
+      allowInsecure: false
+    secrets:
+      - name: mongo-uri
+        keyVaultUrl: https://<key-vault-name>.vault.azure.net/secrets/MONGO-URI
+        identity: system
+      - name: groq-api-key
+        keyVaultUrl: https://<key-vault-name>.vault.azure.net/secrets/GROQ-API-KEY
+        identity: system
+      - name: redis-url
+        keyVaultUrl: https://<key-vault-name>.vault.azure.net/secrets/REDIS-URL
+        identity: system
+    registries:
+      - server: <acr-name>.azurecr.io
+        identity: system
+  template:
+    containers:
+      - image: <acr-name>.azurecr.io/arise-chatbot:<image-tag>
+        name: arise-chatbot
+        env:
+          - name: MONGO_URI
+            secretRef: mongo-uri
+          - name: GROQ_API_KEY
+            secretRef: groq-api-key
+          - name: REDIS_URL
+            secretRef: redis-url
+          - name: PORT
+            value: "8000"
+          - name: ARISE_RELOAD
+            value: "false"
+          - name: LOG_TO_FILES
+            value: "false"
+          - name: LOG_AS_JSON
+            value: "true"
+        probes:
+          - type: Liveness
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          - type: Readiness
+            httpGet:
+              path: /ready
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 30
+        resources:
+          cpu: 1.0
+          memory: 2Gi
+    scale:
+      minReplicas: 1
+      maxReplicas: 3

@@ -1,11 +1,17 @@
 import logging
 import json
+import os
 from pathlib import Path
 from logging import Logger
 
 
 LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_TO_FILES = os.getenv("LOG_TO_FILES", "false").strip().lower() in {"1", "true", "yes", "on"}
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_AS_JSON = os.getenv("LOG_AS_JSON", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+if LOG_TO_FILES:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class JSONFormatter(logging.Formatter):
@@ -95,30 +101,31 @@ class PlainFormatter(logging.Formatter):
 
 def _make_logger(name: str, file_name: str) -> Logger:
     lg = logging.getLogger(name)
-    lg.setLevel(logging.INFO)
+    lg.setLevel(LOG_LEVEL)
+    lg.propagate = False
 
     # avoid duplicate handlers
-    if not any(isinstance(h, logging.StreamHandler) for h in lg.handlers):
+    if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler) for h in lg.handlers):
         sh = logging.StreamHandler()
-        sh.setLevel(logging.INFO)
-        sh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        sh.setLevel(LOG_LEVEL)
+        sh.setFormatter(JSONFormatter() if LOG_AS_JSON else logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
         lg.addHandler(sh)
+
+    if not LOG_TO_FILES:
+        return lg
 
     # file handler with JSON formatter
     if not any(isinstance(h, logging.FileHandler) and getattr(h, "_is_structured", False) for h in lg.handlers):
-        # JSONL file for machine parsing
         fh = logging.FileHandler(LOG_DIR / file_name, encoding="utf-8")
-        fh.setLevel(logging.INFO)
+        fh.setLevel(LOG_LEVEL)
         fh.setFormatter(JSONFormatter())
         fh._is_structured = True
         lg.addHandler(fh)
 
-    # also add a plain-text structured log for human consumption (same base name with .log)
     plain_name = Path(file_name).with_suffix(".log")
     if not any(isinstance(h, logging.FileHandler) and getattr(h, "_is_plain", False) for h in lg.handlers):
         ph = logging.FileHandler(LOG_DIR / plain_name, encoding="utf-8")
-        ph.setLevel(logging.INFO)
-        # pass datefmt as the second (datefmt) argument, not the format string
+        ph.setLevel(LOG_LEVEL)
         ph.setFormatter(PlainFormatter(datefmt="%Y-%m-%dT%H:%M:%S"))
         ph._is_plain = True
         lg.addHandler(ph)
