@@ -6,7 +6,7 @@ just imports `collection` instead of re-connecting.
 
 Usage:
     from src.database import collection
-sdfs"""
+"""
 
 import os
 from pymongo import MongoClient
