@@ -1,6 +1,8 @@
 .git
 .gitignore
 .venv
+.env
+.env.*
 __pycache__/
 *.pyc
 *.pyo
@@ -8,7 +10,15 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-.env
+.cache/
+.huggingface/
+.idea/
+.vscode/
+models/
+checkpoints/
+artifacts/
+wandb/
+mlruns/
 data/
 research/
 build/
@@ -17,3 +27,11 @@ dist/
 src/logs/
 __marimo__/
 *.ipynb
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.onnx
+*.parquet
+*.csv
+*.tsv

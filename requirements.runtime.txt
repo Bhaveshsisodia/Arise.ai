@@ -1,0 +1,16 @@
+fastapi
+gunicorn
+uvicorn
+jinja2
+pydantic
+python-dotenv
+pyyaml
+pymongo
+redis
+numpy==1.26.4
+langchain
+langchain-community
+langchain-core
+langchain-groq
+langsmith
+sentence-transformers
