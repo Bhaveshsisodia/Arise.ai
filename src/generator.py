@@ -35,11 +35,11 @@ def get_llm() -> ChatGroq:
     Returns a configured ChatGroq LLM instance.
     Model and temperature come from config/config.yaml.
     """
-    api_key = os.getenv("GROQ_API_KEY")
+    api_key = os.getenv("GROQ_API_KEY") or os.getenv("GROQAPIKEY")
     if not api_key:
         raise LLMError(
             "GROQ_API_KEY not found in environment / .env file",
-            context={"env_var": "GROQ_API_KEY"},
+            context={"env_var": "GROQ_API_KEY", "fallback_env_var": "GROQAPIKEY"},
         )
 
     try:

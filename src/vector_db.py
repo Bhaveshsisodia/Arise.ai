@@ -17,11 +17,11 @@ from src.exception.error_utils import raise_with_context
 
 load_dotenv()
 
-_MONGO_URI = os.environ.get("MONGO_URI")
+_MONGO_URI = os.environ.get("MONGO_URI") or os.environ.get("MONGOURI")
 if not _MONGO_URI:
     raise DatabaseError(
         "MONGO_URI not found in environment / .env file",
-        context={"env_var": "MONGO_URI"},
+        context={"env_var": "MONGO_URI", "fallback_env_var": "MONGOURI"},
     )
 
 try:

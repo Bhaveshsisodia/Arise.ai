@@ -42,7 +42,11 @@ class RedisCache:
             self.enabled = False
             return
 
-        redis_url = os.getenv("REDIS_URL") or CFG.get("redis", {}).get("url")
+        redis_url = (
+            os.getenv("REDIS_URL")
+            or os.getenv("REDIS-URL")
+            or CFG.get("redis", {}).get("url")
+        )
         try:
             if redis_url:
                 self._client = redis.from_url(redis_url, decode_responses=True)
