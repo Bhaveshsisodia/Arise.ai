@@ -34,6 +34,7 @@ from src.exception.custom_exception import (
 )
 from src.exception.error_utils import raise_with_context
 from src.generator import build_context, get_llm, output_parser
+from src.guardrails_runtime import guardrail_runtime
 from src.router import QueryRouter
 from src.reranker import CrossEncoderReranker, LLMListwiseReranker
 from src.retriever import MongoHybridRetriever
@@ -310,11 +311,13 @@ def _prepare_response_payload(
             context={"field": "question"},
         )
 
+    guarded_question = guardrail_runtime.validate_input(question).text
+
     components = build_chain_components(use_llm_reranker)
     normalized_history = _get_effective_history(history, session_id)
     router = QueryRouter(llm=components["llm"])
-    datasource = _route_question(question, router)
-    retrieval_question = _contextualize_question(components["llm"], question, normalized_history)
+    datasource = _route_question(guarded_question, router)
+    retrieval_question = _contextualize_question(components["llm"], guarded_question, normalized_history)
 
     if datasource == "chat":
         documents: List[Document] = []
@@ -338,7 +341,7 @@ def _prepare_response_payload(
                 RetrievalError,
                 exc,
                 "Failed to prepare retrieval response payload",
-                context={"question": question, "retrieval_question": retrieval_question},
+                context={"question": guarded_question, "retrieval_question": retrieval_question},
             )
 
     return {
@@ -346,7 +349,7 @@ def _prepare_response_payload(
         "datasource": datasource,
         "documents": documents,
         "context": build_context(documents),
-        "question": question,
+        "question": guarded_question,
         "history": normalized_history,
         "session_id": session_id,
     }
@@ -658,17 +661,22 @@ def ask_with_sources(
         session_id=session_id,
         use_llm_reranker=use_llm_reranker,
     )
+    answer = _normalize_output(
+        _generate_answer_text(
+            llm=result["llm"],
+            question=result["question"],
+            history=result["history"],
+            session_id=result["session_id"],
+            datasource=result["datasource"],
+            context=result["context"],
+        )
+    )
+    answer = guardrail_runtime.validate_output(
+        answer,
+        datasource=result["datasource"],
+    ).text
     payload = {
-        "answer": _normalize_output(
-            _generate_answer_text(
-                llm=result["llm"],
-                question=result["question"],
-                history=result["history"],
-                session_id=result["session_id"],
-                datasource=result["datasource"],
-                context=result["context"],
-            )
-        ),
+        "answer": answer,
         "sources": _build_sources(result["documents"], max_sources),
     }
 
@@ -805,7 +813,7 @@ def _stream_answer_text(
         for chunk in chain.stream(payload, config={"configurable": {"session_id": session_id}}):
             normalized = _normalize_output(chunk)
             if normalized:
-                yield normalized
+                yield guardrail_runtime.validate_stream_chunk(normalized)
         return
 
     if datasource == "chat":
@@ -820,7 +828,7 @@ def _stream_answer_text(
                 continue
             normalized = _normalize_output(text)
             if normalized:
-                yield normalized
+                yield guardrail_runtime.validate_stream_chunk(normalized)
     except Exception as exc:
         raise_with_context(
             LLMGenerationError,

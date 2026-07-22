@@ -13,4 +13,5 @@ langchain-community
 langchain-core
 langchain-groq
 langsmith
+guardrails-ai
 sentence-transformers

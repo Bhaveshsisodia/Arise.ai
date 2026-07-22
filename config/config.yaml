@@ -57,3 +57,24 @@ redis:
   prefix: "arise"
   semantic_enabled: true
   semantic_similarity_threshold: 0.80
+
+guardrails:
+  enabled: true
+  fail_closed: true
+  input:
+    min_chars: 3
+    max_chars: 1000
+    block_prompt_injection: true
+    block_patterns:
+      - "(?i)ignore\\s+previous\\s+instructions"
+      - "(?i)ignore\\s+all\\s+instructions"
+      - "(?i)reveal\\s+your\\s+system\\s+prompt"
+      - "(?i)show\\s+the\\s+developer\\s+message"
+      - "(?i)bypass\\s+(your\\s+)?safety"
+  output:
+    require_citations_for_retrieval: true
+    citation_exempt_response: "Information not available in retrieved documents."
+    blocked_patterns:
+      - "(?i)system\\s+prompt"
+      - "(?i)developer\\s+message"
+      - "(?i)api[_\\s-]?key"

@@ -83,3 +83,8 @@ class QueryRewriteError(ProjectException):
 class LLMGenerationError(ProjectException):
     error_code = "LLM_GENERATION_ERROR"
     status_code = 502
+
+
+class GuardrailViolationError(ProjectException):
+    error_code = "GUARDRAIL_VIOLATION"
+    status_code = 400

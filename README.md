@@ -251,6 +251,32 @@ Notable options:
 - Cross-encoder and LLM reranker toggles
 - Query rewriting strategy
 - Redis cache settings
+- Guardrail toggles for input and output validation
+
+## Guardrails
+
+The runtime now includes a first-pass guardrail layer around the main RAG flow:
+
+- Input guardrails run before routing and retrieval
+- Output guardrails run before a final answer is returned
+- Streaming responses apply chunk-level output checks
+
+Current rules are configured in [config/config.yaml](/D:/python%20scripts/Generative%20AI/arise_chatbot/config/config.yaml) under `guardrails:`.
+
+Default checks include:
+
+- prompt-injection pattern blocking on user questions
+- question length limits
+- citation enforcement for retrieval-backed answers
+- output pattern blocking for prompt or key leakage
+
+Install dependency:
+
+```bash
+pip install -r requirements.txt
+```
+
+The repo now lists `guardrails-ai`, but the current first step uses deterministic in-app checks and keeps a clean integration point for Guardrails Hub validators later.
 
 ## Evaluation
 

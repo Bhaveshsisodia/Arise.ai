@@ -121,6 +121,30 @@ function renderMarkdown(text) {
     return html || '<p></p>';
 }
 
+function formatApiError(errorPayload, fallbackMessage = 'An unexpected error occurred.') {
+    if (!errorPayload) {
+        return fallbackMessage;
+    }
+
+    if (typeof errorPayload === 'string') {
+        return errorPayload;
+    }
+
+    const errorObject = errorPayload.error && typeof errorPayload.error === 'object'
+        ? errorPayload.error
+        : errorPayload;
+
+    const message = typeof errorObject.message === 'string' && errorObject.message.trim()
+        ? errorObject.message.trim()
+        : fallbackMessage;
+
+    const code = typeof errorObject.code === 'string' && errorObject.code.trim()
+        ? errorObject.code.trim()
+        : '';
+
+    return code ? `${message} (${code})` : message;
+}
+
 function addMessage(role, text) {
     const el = document.createElement('div');
     el.className = 'message ' + role;
@@ -270,8 +294,14 @@ async function sendQuestion() {
         });
 
         if (!response.ok) {
-            const errorText = await response.text();
-            content.textContent = errorText;
+            let errorMessage = 'Request failed.';
+            try {
+                const errorPayload = await response.json();
+                errorMessage = formatApiError(errorPayload, errorMessage);
+            } catch (_) {
+                errorMessage = await response.text();
+            }
+            content.innerHTML = renderMarkdown(errorMessage);
             botMessage.className = 'message error';
             return;
         }
@@ -302,7 +332,8 @@ async function sendQuestion() {
                                 addSourcesToMessage(botMessage, event.sources);
                             }
                         } else if (event.type === 'error') {
-                            streamRenderer.push(`\n[ERROR] ${event.error}`);
+                            const errorMessage = formatApiError(event.error, 'Streaming request failed.');
+                            streamRenderer.push(`\n[ERROR] ${errorMessage}`);
                             streamRenderer.finish();
                             botMessage.className = 'message error';
                         }
